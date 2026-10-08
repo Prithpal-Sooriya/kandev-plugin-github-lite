@@ -1,0 +1,132 @@
+# kandev-plugin-github-lite — an API-frugal GitHub source-control plugin.
+#
+# Provides exactly two things, and deliberately nothing else:
+#   1. GitHub repositories in the task-create-from-URL / repository pickers.
+#   2. Pull-request status on tasks: link/unlink from the Link dialog or by
+#      pasting a PR reference into a message, plus a card indicator, top-bar
+#      status, CI chip, and PR detail panel for every linked pull request.
+#
+# It never browses GitHub: no issue watching, no PR dashboard, no review
+# queue, and no GitHub search API (which is capped at 30 req/min regardless
+# of token). All calls are core REST, made on demand, behind a TTL cache.
+# There is no background poller: the recipe contract forbids one, so the
+# plugin only ever touches the API when you interact with a task.
+id: "kandev-plugin-github-lite"
+api_version: 1
+version: "0.1.0"
+display_name: "GitHub Lite"
+description: "API-frugal GitHub source control for kandev: repositories for task creation, and pull-request status linked to tasks. No dashboards, no issue watching, no GitHub search API."
+author: "Prithpal-Sooriya"
+categories: ["integrations", "tools"]
+license: "MIT"
+homepage: "https://github.com/Prithpal-Sooriya/kandev-plugin-github-lite"
+
+# The source-control provider/reference contracts this plugin uses shipped
+# in v0.97.0, the first (and currently only) release tag containing them.
+# Installing against anything older fails with a clear version error instead
+# of a plugin that loads and then breaks on a missing API.
+min_kandev_version: "0.97.0"
+
+# `make package` cross-compiles all five platforms from these entries.
+runtime:
+  type: binary
+  executables:
+    linux-amd64: "server/plugin-linux-amd64"
+    linux-arm64: "server/plugin-linux-arm64"
+    darwin-amd64: "server/plugin-darwin-amd64"
+    darwin-arm64: "server/plugin-darwin-arm64"
+    windows-amd64: "server/plugin-windows-amd64.exe"
+
+# capabilities:
+#   api_read:tasks       — auto-attach resolves a task's checkout branch and
+#                          linked repository rows through Host.Tasks().
+#   api_read:repositories — the same resolution and the repository pickers
+#                          read workspace repository rows through
+#                          Host.Repositories().
+#   state                — link/unlink associations are stored in Host state
+#                          (scope "workspace", one key per task).
+capabilities:
+  api_read: ["tasks", "repositories"]
+  state: true
+
+# Provider ownership for URLs and reference sources. "github" itself is
+# reserved by kandev's core GitHub integration; this plugin registers as
+# "github-lite". When the core integration is not authenticated,
+# repositories.inspect returns null for github.com URLs and ownership falls
+# through to this plugin — so the two never fight over a URL.
+repository_providers: ["github-lite"]
+
+reference_sources:
+  - source: "github_lite_pull_requests"
+    provider: "github-lite"
+    kind: "change_request"
+    display_name: "GitHub pull requests"
+    kind_label: "Pull request"
+    order: 100
+
+# Browser bodies are untrusted and bounded. Kandev authorizes each selector,
+# passes it separately as VerifiedActionContext, and propagates cancellation.
+actions:
+  - key: "repositories.list"
+    scope: "workspace"
+    max_body_bytes: 16384
+  - key: "repositories.inspect"
+    scope: "workspace"
+    max_body_bytes: 16384
+  - key: "repositories.branches"
+    scope: "workspace"
+    max_body_bytes: 16384
+  - key: "change_requests.create"
+    scope: "task"
+    max_body_bytes: 65536
+  - key: "change_requests.get"
+    scope: "task"
+    max_body_bytes: 1024
+  - key: "change_requests.link"
+    scope: "task"
+    max_body_bytes: 16384
+  - key: "change_requests.unlink"
+    scope: "task"
+    max_body_bytes: 4096
+  - key: "change_requests.associations"
+    scope: "workspace"
+    max_body_bytes: 1024
+
+# No webhooks. The plugin is entirely pull-based; nothing needs to be
+# curl-able from outside kandev.
+
+ui:
+  bundle: "/ui/bundle.js"
+
+# Operator settings, rendered at Settings > Plugins > GitHub Lite. The
+# token is stored in kandev's encrypted vault and only ever appears as
+# cleartext inside this plugin's process. A fine-grained PAT with read-only
+# Contents/Pull requests/Metadata permissions on the repositories you work
+# in is enough; it is never used to write anything.
+config_schema:
+  type: object
+  properties:
+    github_token:
+      type: string
+      title: "GitHub access token"
+      description: "Personal access token (classic or fine-grained) with read access to your repositories. Read-only is sufficient."
+      secret: true
+    github_api_url:
+      type: string
+      title: "GitHub API base URL"
+      description: "Override only for GitHub Enterprise Server (e.g. https://github.example.com/api/v3). Leave empty for github.com."
+    cache_ttl_seconds:
+      type: integer
+      title: "Cache TTL (seconds)"
+      description: "How long a GitHub API response is reused before refetching. Higher is cheaper; 300 (5 minutes) is a good default."
+      default: 300
+    auto_attach:
+      type: boolean
+      title: "Auto-attach pull requests"
+      description: "Show open pull requests on a task whose checkout branch matches a pull request head branch, without linking anything manually."
+      default: true
+    max_list_pages:
+      type: integer
+      title: "Repository list pages (max)"
+      description: "Upper bound on pages fetched per repository list request (100 repos per page). Kept small to stay frugal with the API."
+      default: 3

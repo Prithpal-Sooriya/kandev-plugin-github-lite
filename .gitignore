@@ -1,0 +1,5 @@
+/bin/
+/.build/
+/node_modules/
+*.tar.gz
+/ui/bundle.js
