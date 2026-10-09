@@ -436,6 +436,7 @@ func TestInspectURLUsesVerifiedWorkspaceAndBindsProviderIdentity(t *testing.T) {
 		OwnerOrProject:  "tools",
 		Name:            "widgets",
 		CloneURL:        "https://code.example/tools/widgets.git",
+		DefaultBranch:  "main",
 	}
 	details := &repositoryDetailsStub{inspected: inspected}
 	extension := &Extension{ProviderID: "acme", RepositoryDetails: details}
@@ -456,6 +457,26 @@ func TestInspectURLUsesVerifiedWorkspaceAndBindsProviderIdentity(t *testing.T) {
 	require.NotNil(t, body.Repository)
 	require.Equal(t, "acme", body.Repository.ProviderID)
 	require.Equal(t, inspected.RepositoryID, body.Repository.RepositoryID)
+
+	// Host-contract regression: kandev's backend decodes the nested descriptor
+	// with exactly this key set and rejects the inspection as invalid when any
+	// of them decodes empty — notably the repository id must serialize as
+	// `provider_repository_id`, never `repository_id` (see
+	// repository_provider_inspect.go: validateRepositoryProviderInspection).
+	var envelope struct {
+		Repository map[string]any `json:"repository"`
+	}
+	require.NoError(t, json.Unmarshal(response.Body, &envelope))
+	_, legacy := envelope.Repository["repository_id"]
+	require.False(t, legacy, "legacy repository_id key must not serialize")
+	for _, key := range []string{
+		"provider_id", "provider_host", "provider_scope", "provider_repository_id",
+		"owner_or_project", "name", "clone_url", "default_branch",
+	} {
+		value, ok := envelope.Repository[key].(string)
+		require.True(t, ok, "host contract key %q must serialize as a string", key)
+		require.NotEmpty(t, value, "host contract key %q must be non-empty", key)
+	}
 }
 
 func TestBranchesResolveStoredImmutableIdentityBeforeProviderIO(t *testing.T) {

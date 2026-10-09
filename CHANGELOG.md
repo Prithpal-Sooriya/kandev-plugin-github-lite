@@ -4,6 +4,19 @@ All notable changes to this plugin are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com); versions match
 `manifest.yaml` (and the `Makefile`).
 
+## [0.1.3] — 2026-02-04
+
+### Fixed
+
+- Task creation from a pasted repository/PR URL failed with "The selected
+  repository could not be verified" even though the plugin claimed the URL:
+  the recipe's repository descriptor serialized its repository id as
+  `repository_id`, but kandev's backend decodes provider inspections with the
+  key `provider_repository_id` and rejects the descriptor as invalid when the
+  id decodes empty. The descriptor now serializes the host's key (the recipe
+  UI accepts the legacy spelling on input), and a host-contract regression
+  test pins the full required key set.
+
 ## [0.1.2] — 2026-02-04
 
 ### Added

@@ -217,7 +217,10 @@ function normalizeRepository(providerId: string, value: unknown): RepositoryInsp
   const source = record(value);
   const providerHost = text(source.provider_host);
   const ownerOrProject = text(source.owner_or_project);
-  const repositoryId = text(source.repository_id);
+  // kandev's backend validator requires the `provider_repository_id`
+  // spelling; the legacy `repository_id` spelling is accepted for symmetry
+  // with the server recipe's dual-key branch-list input.
+  const repositoryId = text(source.provider_repository_id) || text(source.repository_id);
   const repositoryName = text(source.name);
   const cloneUrl = text(source.clone_url);
   if (!providerHost || !ownerOrProject || !repositoryId || !repositoryName || !cloneUrl) return null;
