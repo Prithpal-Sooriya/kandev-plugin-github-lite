@@ -41,6 +41,23 @@ type Repository struct {
 	Name            string `json:"name"`
 	CloneURL        string `json:"clone_url"`
 	DefaultBranch   string `json:"default_branch,omitempty"`
+
+	// Pull-request detail, present only when the inspected URL points at a
+	// pull request (github.com/owner/repo/pull/N). Kandev's task-create URL
+	// flow reads these to preselect the PR's head branch (base_branch of the
+	// created task) and to prefill the task title — without them the flow
+	// falls back to the repository's default branch.
+	HeadBranch string         `json:"head_branch,omitempty"`
+	BaseBranch string         `json:"base_branch,omitempty"`
+	PullRequest *PullRequestRef `json:"pull_request,omitempty"`
+}
+
+// PullRequestRef is the identity slice of a pull request carried by a
+// Repository inspection: enough for the URL flow to preselect the head
+// branch and prefill a title, nothing more.
+type PullRequestRef struct {
+	Number int    `json:"number"`
+	Title  string `json:"title"`
 }
 
 type RepositoryIdentity struct {

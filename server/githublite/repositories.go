@@ -175,7 +175,25 @@ func (a *Adapters) Inspect(ctx context.Context, workspaceID, rawURL string) (*re
 		return nil, nil // not found or not visible
 	}
 	inspected := repositoryFromAPI(payload, scope)
-	logger.Info("repository inspect", "workspace", workspaceID, "url", rawURL, "outcome", "claimed", "repository", owner+"/"+repo)
+	// A PR URL (github.com/owner/repo/pull/N) carries one more answer: the
+	// task-create URL flow preselects the PR's head branch from these
+	// fields, and without them falls back to the default branch (main). A
+	// PR fetch failure must not fail the inspection — the repository claim
+	// stands, only the PR detail is missing.
+	if _, _, number, isPR := parsePullReference(rawURL); isPR {
+		if pull, err := a.fetchPullRequest(ctx, owner, repo, number); err != nil {
+			logger.Info("repository inspect", "workspace", workspaceID, "url", rawURL, "outcome", "claimed", "repository", owner+"/"+repo, "pr", number, "pr_outcome", "error", "pr_error", err.Error())
+		} else if pull == nil {
+			logger.Info("repository inspect", "workspace", workspaceID, "url", rawURL, "outcome", "claimed", "repository", owner+"/"+repo, "pr", number, "pr_outcome", "not found or not visible")
+		} else {
+			inspected.HeadBranch = pull.Head.Ref
+			inspected.BaseBranch = pull.Base.Ref
+			inspected.PullRequest = &recipe.PullRequestRef{Number: int(pull.Number), Title: pull.Title}
+			logger.Info("repository inspect", "workspace", workspaceID, "url", rawURL, "outcome", "claimed", "repository", owner+"/"+repo, "pr", number, "pr_outcome", "included", "head_branch", pull.Head.Ref)
+		}
+	} else {
+		logger.Info("repository inspect", "workspace", workspaceID, "url", rawURL, "outcome", "claimed", "repository", owner+"/"+repo)
+	}
 	return &inspected, nil
 }
 

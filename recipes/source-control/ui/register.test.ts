@@ -150,6 +150,36 @@ describe("registerSourceControlRecipe", () => {
     });
   });
 
+  it("normalizes PR detail from a PR-URL inspection for the task-create flow", async () => {
+    const test = harness({
+      repository: {
+        provider_host: "github.com",
+        provider_scope: "connection-7",
+        owner_or_project: "acme",
+        provider_repository_id: "immutable-repository-9",
+        name: "widgets",
+        clone_url: "https://github.com/acme/widgets.git",
+        default_branch: "main",
+        head_branch: "feat/assets-prefetch",
+        base_branch: "main",
+        pull_request: { number: 42, title: "PR 42" },
+      },
+    });
+    const signal = new AbortController().signal;
+
+    const inspected = await test.repositoryProvider!.inspectURL({
+      workspaceId: "workspace-1",
+      url: "https://github.com/acme/widgets/pull/42",
+      signal,
+    });
+
+    expect(inspected).toMatchObject({
+      headBranch: "feat/assets-prefetch",
+      baseBranch: "main",
+      pullRequest: { number: 42, title: "PR 42" },
+    });
+  });
+
   it("lists branches through a credential-free immutable repository descriptor", async () => {
     const test = harness({
       branches: [
