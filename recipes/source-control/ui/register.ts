@@ -232,11 +232,13 @@ function normalizeRepository(providerId: string, value: unknown): RepositoryInsp
   const headBranch = text(source.head_branch);
   const baseBranch = text(source.base_branch);
   const pull = record(source.pull_request);
-  const pullNumber = pull ? Number(pull.number) : undefined;
-  const pullRequest =
-    pull && Number.isFinite(pullNumber) && pullNumber > 0
-      ? { number: pullNumber, title: text(pull.title) }
-      : undefined;
+  let pullRequest: RepositoryInspection["pullRequest"] = undefined;
+  if (pull) {
+    const candidate = Number(pull.number);
+    if (Number.isFinite(candidate) && candidate > 0) {
+      pullRequest = { number: candidate, title: text(pull.title) };
+    }
+  }
   return {
     providerId,
     providerHost,
