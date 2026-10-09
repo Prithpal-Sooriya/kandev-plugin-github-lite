@@ -29,44 +29,65 @@ type associationRecord struct {
 type associationDocument struct {
 	TaskID       string              `json:"task_id"`
 	Associations []associationRecord `json:"associations"`
+	// Removed tombstones identities the user unlinked. Auto-link (the
+	// reviews refresh that discovers open PRs on a task's checkout branch)
+	// must never re-display or re-persist a tombstoned pull: without this,
+	// unlink would be silently undone within one TTL window because the
+	// cached pulls?head= match keeps firing. A manual link clears the
+	// tombstone — re-linking on purpose always wins.
+	Removed []associationRecord `json:"removed,omitempty"`
 }
 
-// readAssociations loads a task's stored associations (empty when unset).
-func (a *Adapters) readAssociations(ctx context.Context, workspaceID, taskID string) ([]associationRecord, error) {
+// tombstoned reports whether the repository+number pair was unlinked
+// (scope-insensitive: the pair identifies the pull even if the token's
+// owner changes).
+func (d associationDocument) tombstoned(repositoryID string, number int64) bool {
+	for _, removed := range d.Removed {
+		if removed.RepositoryID == repositoryID && removed.Number == number {
+			return true
+		}
+	}
+	return false
+}
+
+// readAssociationDocument loads a task's association document (zero value
+// when unset).
+func (a *Adapters) readAssociationDocument(ctx context.Context, workspaceID, taskID string) (associationDocument, error) {
 	host := a.host()
 	if host == nil {
-		return nil, fmt.Errorf("github-lite: Host not injected yet")
+		return associationDocument{}, fmt.Errorf("github-lite: Host not injected yet")
 	}
 	value, found, err := host.GetState(ctx, "workspace", workspaceID, taskStateKey(taskID))
 	if err != nil {
-		return nil, fmt.Errorf("github-lite: reading associations for task %s: %w", taskID, err)
+		return associationDocument{}, fmt.Errorf("github-lite: reading associations for task %s: %w", taskID, err)
 	}
 	if !found || value == nil {
-		return nil, nil
+		return associationDocument{TaskID: taskID}, nil
 	}
 	// Host state values round-trip through protobuf Structs, so the document
 	// arrives as map[string]any; re-marshal through the typed shape.
 	encoded, err := json.Marshal(value)
 	if err != nil {
-		return nil, fmt.Errorf("github-lite: decoding associations for task %s: %w", taskID, err)
+		return associationDocument{}, fmt.Errorf("github-lite: decoding associations for task %s: %w", taskID, err)
 	}
 	var document associationDocument
 	if err := json.Unmarshal(encoded, &document); err != nil {
-		return nil, fmt.Errorf("github-lite: decoding associations for task %s: %w", taskID, err)
+		return associationDocument{}, fmt.Errorf("github-lite: decoding associations for task %s: %w", taskID, err)
 	}
-	return document.Associations, nil
+	return document, nil
 }
 
-// writeAssociations replaces a task's stored associations.
-func (a *Adapters) writeAssociations(ctx context.Context, workspaceID, taskID string, records []associationRecord) error {
+// writeAssociationDocument replaces a task's stored associations and
+// tombstones atomically (one host-state key).
+func (a *Adapters) writeAssociationDocument(ctx context.Context, workspaceID, taskID string, document associationDocument) error {
 	host := a.host()
 	if host == nil {
 		return fmt.Errorf("github-lite: Host not injected yet")
 	}
-	if records == nil {
-		records = []associationRecord{}
+	document.TaskID = taskID
+	if document.Associations == nil {
+		document.Associations = []associationRecord{}
 	}
-	document := associationDocument{TaskID: taskID, Associations: records}
 	encoded, err := json.Marshal(document)
 	if err != nil {
 		return err
@@ -97,37 +118,61 @@ func recordToIdentity(record associationRecord) recipe.ChangeRequestIdentity {
 	}
 }
 
-// Link associates a pull request with a task (idempotent).
+// Link associates a pull request with a task (idempotent). It also clears
+// the identity's tombstone, if any: linking is an explicit instruction that
+// always beats a past unlink.
 func (a *Adapters) Link(ctx context.Context, taskID string, identity recipe.ChangeRequestIdentity) error {
 	workspaceID := ctxWorkspaceID(ctx)
-	records, err := a.readAssociations(ctx, workspaceID, taskID)
+	document, err := a.readAssociationDocument(ctx, workspaceID, taskID)
 	if err != nil {
 		return err
 	}
 	candidate := identityToRecord(identity)
-	for _, existing := range records {
+	linked := false
+	for _, existing := range document.Associations {
 		if existing == candidate {
-			return nil
+			linked = true
+			break
 		}
 	}
-	return a.writeAssociations(ctx, workspaceID, taskID, append(records, candidate))
+	if !linked {
+		document.Associations = append(document.Associations, candidate)
+	}
+	if len(document.Removed) > 0 {
+		kept := make([]associationRecord, 0, len(document.Removed))
+		for _, removed := range document.Removed {
+			if removed.RepositoryID != candidate.RepositoryID || removed.Number != candidate.Number {
+				kept = append(kept, removed)
+			}
+		}
+		document.Removed = kept
+	}
+	if linked && len(document.Removed) == 0 {
+		return nil // nothing changed
+	}
+	return a.writeAssociationDocument(ctx, workspaceID, taskID, document)
 }
 
-// Unlink removes one immutable identity from a task's associations.
+// Unlink removes one immutable identity from a task's associations and
+// tombstones it so auto-link cannot resurrect it on the next refresh.
 func (a *Adapters) Unlink(ctx context.Context, taskID string, identity recipe.ChangeRequestIdentity) error {
 	workspaceID := ctxWorkspaceID(ctx)
-	records, err := a.readAssociations(ctx, workspaceID, taskID)
+	document, err := a.readAssociationDocument(ctx, workspaceID, taskID)
 	if err != nil {
 		return err
 	}
 	target := identityToRecord(identity)
-	kept := make([]associationRecord, 0, len(records))
-	for _, existing := range records {
+	kept := make([]associationRecord, 0, len(document.Associations))
+	for _, existing := range document.Associations {
 		if existing != target {
 			kept = append(kept, existing)
 		}
 	}
-	return a.writeAssociations(ctx, workspaceID, taskID, kept)
+	if !document.tombstoned(target.RepositoryID, target.Number) {
+		document.Removed = append(document.Removed, target)
+	}
+	document.Associations = kept
+	return a.writeAssociationDocument(ctx, workspaceID, taskID, document)
 }
 
 // workspaceIDContext is the context key type carrying the verified

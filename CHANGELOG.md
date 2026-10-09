@@ -4,6 +4,30 @@ All notable changes to this plugin are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com); versions match
 `manifest.yaml` (and the `Makefile`).
 
+## [0.1.6] — 2026-02-04
+
+### Added
+
+- Pull requests an agent pushes and opens are now **auto-linked to their
+  task**: when the task's reviews refresh (panel mount, navigation, or the
+  freshness sweep), auto-attach already looks for an open PR whose head is
+  the task repository's checkout branch (one TTL-cached
+  `GET /repos/{o}/{r}/pulls?head={o}:{branch}&state=open` call). A fresh match
+  is now also **persisted as the task's association** — the exact durable
+  link a manual `change_requests.link` writes — so the PR lights up the
+  task's linked-PR surfaces (icon, status, CI anatomy, unlink) instead of
+  only surfacing transiently in the panel. Auto-linking adds zero GitHub
+  calls beyond the lookup auto-attach already makes, and runs only inside
+  the same pull-based refreshes the host already triggers.
+
+### Fixed
+
+- Unlinking a pull request no longer resurrects: the association document
+  now tombstones unlinked identities, so auto-attach (whose cached
+  `pulls?head=` match keeps firing on every refresh) can neither re-display
+  nor re-persist a pull the user removed. A manual link clears the
+  tombstone — re-linking on purpose always wins.
+
 ## [0.1.5] — 2026-02-04
 
 ### Fixed
