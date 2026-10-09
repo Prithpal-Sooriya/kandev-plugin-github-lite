@@ -7,6 +7,14 @@ browsing, no search API, and — most importantly — **no background poller**.
 Every GitHub call happens because you did something, and every response is
 TTL-cached so refreshing a task costs nothing.
 
+## Walkthrough
+
+A short walkthrough of how the plugin is put together: the recipe, the GitHub adapters, the cache, and the browser half.
+
+[how-github-lite-works.mp4](docs/how-github-lite-works.mp4)
+
+> 🤖 AI-generated walkthrough — script, animation, and voice made by an agent
+
 ## What it does
 
 - **Link pull requests to tasks.** A task action ("Link GitHub pull request")
