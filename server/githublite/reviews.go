@@ -318,6 +318,16 @@ func (a *Adapters) ForTask(ctx context.Context, workspaceID, taskID string) ([]r
 		return nil, fmt.Errorf("github-lite: task reviews require workspace and task")
 	}
 
+	// Warm the connection scope before any summary is built: every summary's
+	// identity carries it, and on a cold process (fresh install, app restart)
+	// it has not been resolved yet — a summary without it is rejected by the
+	// recipe layer as an incomplete identity, failing the whole refresh. One
+	// /user call per process lifetime (per-process cached); a transient
+	// failure fails this refresh and the next sweep retries.
+	if _, err := a.ConnectionScope(ctx, workspaceID); err != nil {
+		return nil, err
+	}
+
 	seen := make(map[string]bool)
 	summaries := make([]recipe.ReviewSummary, 0)
 
@@ -400,7 +410,6 @@ func (a *Adapters) attachOpenHeadPRs(ctx context.Context, workspaceID, taskID, o
 	if err := a.client.getJSON(ctx, path, &pulls); err != nil {
 		return
 	}
-	var scope string
 	for _, pull := range pulls {
 		if pull.Number == 0 || pull.Head.Ref != branch {
 			continue
@@ -421,21 +430,9 @@ func (a *Adapters) attachOpenHeadPRs(ctx context.Context, workspaceID, taskID, o
 		*summaries = append(*summaries, a.toReviewSummary(ctx, status, repositoryID))
 
 		// Auto-link: persist the match as the task's association (same store
-		// as a manual link). The scope is resolved lazily on the first match so
-		// a branch with no open PR pays nothing extra.
-		if strings.TrimSpace(taskID) == "" {
-			continue
-		}
-		if scope == "" {
-			resolved, err := a.ConnectionScope(ctx, workspaceID)
-			if err != nil {
-				logger.Warn("auto-link skipped", "workspace", workspaceID, "task_id", taskID, "pr_number", pull.Number, "reason", "scope resolution failed", "error", err.Error())
-				continue
-			}
-			scope = resolved
-		}
+		// as a manual link). The scope is already warm — ForTask resolved it.
 		identity := recipe.ChangeRequestIdentity{
-			ConnectionScope: scope,
+			ConnectionScope: a.scopeCached(),
 			RepositoryID:    repositoryID,
 			Number:         pull.Number,
 		}
