@@ -473,6 +473,11 @@ func TestAutoAttachMatchesCheckoutBranch(t *testing.T) {
 	require.Len(t, reviews, 1)
 	require.Equal(t, int64(7), reviews[0].ChangeRequestNumber)
 	require.Equal(t, "5001", reviews[0].RepositoryID)
+	// Cold-process regression: this ForTask is the adapter's first scope use,
+	// so the auto-attached summary must carry a resolved connection scope —
+	// an empty one makes the recipe layer reject the whole refresh with
+	// "change-request identity is incomplete".
+	require.Equal(t, "testuser", reviews[0].ConnectionScope)
 
 	value, found, err := host.GetState(ctx, "workspace", "workspace-1", "github_lite_task_associations:task-9")
 	require.NoError(t, err)

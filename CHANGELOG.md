@@ -22,6 +22,12 @@ All notable changes to this plugin are documented here. The format follows
 
 ### Fixed
 
+- The first reviews refresh after a fresh install or app restart failed with
+  "change-request identity is incomplete" when it produced any summary
+  (stored association or auto-attach): summaries carry the connection scope
+  in their identities, and on a cold process the scope had not been resolved
+  yet. `ForTask` now warms the scope before building any summary — one
+  `/user` call per process lifetime.
 - Unlinking a pull request no longer resurrects: the association document
   now tombstones unlinked identities, so auto-attach (whose cached
   `pulls?head=` match keeps firing on every refresh) can neither re-display
