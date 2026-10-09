@@ -427,6 +427,40 @@ func TestUnlinkUsesCompleteIdentityInsteadOfReviewKey(t *testing.T) {
 	}, associations.unlinked)
 }
 
+func TestInspectURLSerializesPullRequestDetail(t *testing.T) {
+	details := &repositoryDetailsStub{inspected: &Repository{
+		ProviderHost:   "github.com",
+		ConnectionScope: "connection-7",
+		RepositoryID:    "immutable-repository-9",
+		OwnerOrProject:  "acme",
+		Name:            "widgets",
+		CloneURL:        "https://github.com/acme/widgets.git",
+		DefaultBranch:  "main",
+		HeadBranch:     "feat/assets-prefetch",
+		BaseBranch:     "main",
+		PullRequest:    &PullRequestRef{Number: 42, Title: "PR 42"},
+	}}
+	extension := &Extension{ProviderID: "acme", RepositoryDetails: details}
+
+	response, err := extension.HandleAction(context.Background(), &pluginsdk.PluginActionRequest{
+		ActionKey: ActionRepositoriesInspect,
+		Context:   pluginsdk.VerifiedActionContext{WorkspaceID: "workspace-1"},
+		Body:      []byte(`{"url":"https://github.com/acme/widgets/pull/42"}`),
+	})
+	require.NoError(t, err)
+
+	var envelope struct {
+		Repository map[string]any `json:"repository"`
+	}
+	require.NoError(t, json.Unmarshal(response.Body, &envelope))
+	require.Equal(t, "feat/assets-prefetch", envelope.Repository["head_branch"])
+	require.Equal(t, "main", envelope.Repository["base_branch"])
+	pull, ok := envelope.Repository["pull_request"].(map[string]any)
+	require.True(t, ok, "pull_request must serialize as an object")
+	require.EqualValues(t, 42, pull["number"])
+	require.Equal(t, "PR 42", pull["title"])
+}
+
 func TestInspectURLUsesVerifiedWorkspaceAndBindsProviderIdentity(t *testing.T) {
 	inspected := &Repository{
 		ProviderID:      "untrusted-result-provider",

@@ -13,7 +13,7 @@
 # plugin only ever touches the API when you interact with a task.
 id: "kandev-plugin-github-lite"
 api_version: 1
-version: "0.1.4"
+version: "0.1.5"
 display_name: "GitHub Lite"
 description: "API-frugal GitHub source control for kandev: repositories for task creation, and pull-request status linked to tasks. No dashboards, no issue watching, no GitHub search API."
 author: "Prithpal-Sooriya"

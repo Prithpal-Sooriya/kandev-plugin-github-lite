@@ -267,6 +267,9 @@ func (f *fakeGitHub) handler() http.Handler {
 			case strings.HasPrefix(parts[2], "pulls/") && strings.HasSuffix(parts[2], "/comments"):
 				number := strings.TrimSuffix(strings.TrimPrefix(parts[2], "pulls/"), "/comments")
 				writeJSON(w, f.comments[slug+"#"+number])
+			case strings.HasPrefix(parts[2], "pulls/") && !strings.Contains(strings.TrimPrefix(parts[2], "pulls/"), "/"):
+				number := strings.TrimPrefix(parts[2], "pulls/")
+				writeJSON(w, f.pulls[slug+"#"+number])
 			case strings.HasPrefix(parts[2], "commits/") && strings.HasSuffix(parts[2], "/check-runs"):
 				number := ""
 				for _, pull := range f.pulls {
@@ -346,6 +349,39 @@ func TestInspectClaimsGitHubURL(t *testing.T) {
 	repository, err = adapters.Inspect(context.Background(), "workspace-1", "https://gitlab.com/acme/widgets")
 	require.NoError(t, err)
 	require.Nil(t, repository)
+}
+
+func TestInspectIncludesPullRequestDetail(t *testing.T) {
+	github := newFakeGitHub(t)
+	host := newFakeHost(nil)
+	adapters := newTestAdapters(t, github, host)
+	github.addPull("acme", "widgets", 42, "feat/assets-prefetch", "main")
+
+	// A PR URL: the inspection carries the PR identity plus its head and base
+	// branches so the task-create URL flow can preselect the PR's branch.
+	repository, err := adapters.Inspect(context.Background(), "workspace-1", "https://github.com/acme/widgets/pull/42")
+	require.NoError(t, err)
+	require.NotNil(t, repository)
+	require.Equal(t, "5001", repository.RepositoryID)
+	require.Equal(t, "feat/assets-prefetch", repository.HeadBranch)
+	require.Equal(t, "main", repository.BaseBranch)
+	require.NotNil(t, repository.PullRequest)
+	require.Equal(t, 42, repository.PullRequest.Number)
+	require.Equal(t, "PR 42", repository.PullRequest.Title)
+
+	// A plain repository URL stays PR-free: no extra GitHub call is made.
+	repository, err = adapters.Inspect(context.Background(), "workspace-1", "https://github.com/acme/widgets")
+	require.NoError(t, err)
+	require.NotNil(t, repository)
+	require.Empty(t, repository.HeadBranch)
+	require.Nil(t, repository.PullRequest)
+
+	// A PR URL whose PR is missing: the repository claim stands, only the
+	// PR detail is absent.
+	repository, err = adapters.Inspect(context.Background(), "workspace-1", "https://github.com/acme/widgets/pull/999")
+	require.NoError(t, err)
+	require.NotNil(t, repository)
+	require.Nil(t, repository.PullRequest)
 }
 
 func TestInspectClaimsSSHRemoteURL(t *testing.T) {

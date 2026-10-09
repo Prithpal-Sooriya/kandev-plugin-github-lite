@@ -4,6 +4,23 @@ All notable changes to this plugin are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com); versions match
 `manifest.yaml` (and the `Makefile`).
 
+## [0.1.5] — 2026-02-04
+
+### Fixed
+
+- Tasks created from a GitHub pull-request URL
+  (github.com/owner/repo/pull/N) started on the repository's default branch
+  (e.g. `main`) instead of the PR's head branch, so agents worked against the
+  wrong base. Kandev's task-create URL flow asks the owning provider to
+  inspect the URL and preselects the PR's head branch from the inspection's
+  pull-request detail — which the plugin never sent. `repositories.inspect`
+  now parses the pull-request number out of the URL (one TTL-cached
+  `GET /repos/{owner}/{repo}/pulls/{n}` call, only for URLs that carry `/pull/N`)
+  and returns `head_branch`, `base_branch`, and `pull_request` alongside the
+  repository descriptor. The task now starts on the PR's head branch and the
+  title prefill shows the real PR title. A PR fetch failure or a missing PR
+  never fails the inspection — the repository claim stands without PR detail.
+
 ## [0.1.4] — 2026-02-04
 
 ### Fixed

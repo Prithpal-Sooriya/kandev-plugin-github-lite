@@ -226,6 +226,17 @@ function normalizeRepository(providerId: string, value: unknown): RepositoryInsp
   if (!providerHost || !ownerOrProject || !repositoryId || !repositoryName || !cloneUrl) return null;
   const providerScope = text(source.provider_scope);
   const defaultBranch = text(source.default_branch);
+  // Pull-request detail, present only when the inspected URL points at a PR
+  // (.../pull/N): the task-create URL flow preselects the PR's head branch
+  // and prefills the task title from these.
+  const headBranch = text(source.head_branch);
+  const baseBranch = text(source.base_branch);
+  const pull = record(source.pull_request);
+  const pullNumber = pull ? Number(pull.number) : undefined;
+  const pullRequest =
+    pull && Number.isFinite(pullNumber) && pullNumber > 0
+      ? { number: pullNumber, title: text(pull.title) }
+      : undefined;
   return {
     providerId,
     providerHost,
@@ -235,6 +246,9 @@ function normalizeRepository(providerId: string, value: unknown): RepositoryInsp
     repositoryName,
     cloneUrl,
     ...(defaultBranch ? { defaultBranch } : {}),
+    ...(headBranch ? { headBranch } : {}),
+    ...(baseBranch ? { baseBranch } : {}),
+    ...(pullRequest ? { pullRequest } : {}),
   };
 }
 
