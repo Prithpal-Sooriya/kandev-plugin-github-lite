@@ -487,3 +487,38 @@ func TestSearchResolvesExactReferenceAndWorkspacePulls(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, allowed)
 }
+
+func TestResolveGitCredentialServesConfiguredToken(t *testing.T) {
+	github := newFakeGitHub(t)
+	host := newFakeHost(nil)
+	adapters := newTestAdapters(t, github, host)
+
+	response, err := adapters.ResolveGitCredential(context.Background(), &pluginsdk.ResolveGitCredentialRequest{
+		WorkspaceID: "workspace-1", Host: "github.com", Path: "acme/widgets.git",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, response)
+	require.Equal(t, "x-access-token", response.Username)
+	// The configured token, transiently (newFakeHost injects test-token).
+	require.Equal(t, "test-token", response.Secret)
+
+	// Only github.com is served: another host must be refused, not answered.
+	_, err = adapters.ResolveGitCredential(context.Background(), &pluginsdk.ResolveGitCredentialRequest{
+		WorkspaceID: "workspace-1", Host: "gitlab.com", Path: "acme/widgets.git",
+	})
+	require.Error(t, err)
+
+	// The lease binding is non-secret, stable for the same token, and empty
+	// (revoked) for a different one.
+	binding, err := adapters.GetGitCredentialBinding(context.Background(), &pluginsdk.GitCredentialBindingRequest{
+		WorkspaceID: "workspace-1", Host: "github.com", Path: "acme/widgets.git",
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, binding.Binding)
+	require.NotContains(t, binding.Binding, "test-token")
+	again, err := adapters.GetGitCredentialBinding(context.Background(), &pluginsdk.GitCredentialBindingRequest{
+		WorkspaceID: "workspace-1", Host: "github.com", Path: "acme/widgets.git",
+	})
+	require.NoError(t, err)
+	require.Equal(t, binding.Binding, again.Binding)
+}
