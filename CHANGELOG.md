@@ -4,6 +4,33 @@ All notable changes to this plugin are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com); versions match
 `manifest.yaml` (and the `Makefile`).
 
+## [0.1.2] — 2026-02-04
+
+### Added
+
+- SSH/scp remote URLs (`git@github.com:owner/repo(.git)`,
+  `ssh://git@github.com/owner/repo(.git)`) now resolve to the same repository
+  as their HTTPS twin. Previously the scp form fell through to the bare-slug
+  fallback and mis-parsed `git@github.com:owner` as the owner, so a remote URL
+  pasted from `git remote get-url origin` 404'd and task creation failed with
+  "The selected repository could not be verified".
+- `repositories.inspect` now logs one line per invocation (URL + outcome:
+  claimed / unclaimed / not visible to token / error) to stderr, which kandev
+  re-emits into its backend log — previously there was no way to see which
+  URL an inspect received when a picker or task-create flow misbehaved.
+
+### Fixed
+
+- Ticket PR staleness: a review surface left open (task view, PR status
+  strip) never re-fetched, so a PR merged on GitHub kept showing its
+  pre-merge state on the ticket indefinitely. The recipe now runs a
+  visibility-gated freshness loop that re-refreshes the tasks and workspaces
+  the host has actually shown (60s sweep while the window is visible, an
+  immediate sweep on focus, 10-minute task / 30-minute workspace windows).
+  The plugin server's TTL cache dedupes the GitHub traffic — quota burn is
+  unchanged; the loop only decides how quickly a TTL-expired change becomes
+  visible.
+
 ## [0.1.1] — 2026-02-04
 
 ### Fixed

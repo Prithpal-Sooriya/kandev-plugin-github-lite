@@ -348,6 +348,28 @@ func TestInspectClaimsGitHubURL(t *testing.T) {
 	require.Nil(t, repository)
 }
 
+func TestInspectClaimsSSHRemoteURL(t *testing.T) {
+	github := newFakeGitHub(t)
+	host := newFakeHost(nil)
+	adapters := newTestAdapters(t, github, host)
+
+	// The scp-like form `git remote get-url origin` prints, with and without
+	// the .git suffix, resolves to the same repository as its HTTPS twin.
+	for _, url := range []string{
+		"git@github.com:acme/widgets.git",
+		"git@github.com:acme/widgets",
+		"ssh://git@github.com/acme/widgets.git",
+		"ssh://github.com/acme/widgets",
+	} {
+		repository, err := adapters.Inspect(context.Background(), "workspace-1", url)
+		require.NoError(t, err, url)
+		require.NotNil(t, repository, url)
+		require.Equal(t, "5001", repository.RepositoryID, url)
+		require.Equal(t, "acme", repository.OwnerOrProject, url)
+		require.Equal(t, "widgets", repository.Name, url)
+	}
+}
+
 func TestLinkAndForTaskRoundTrip(t *testing.T) {
 	github := newFakeGitHub(t)
 	github.addPull("acme", "widgets", 42, "feature/thing", "main")
