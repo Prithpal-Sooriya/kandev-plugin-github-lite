@@ -15,6 +15,7 @@ import (
 	"github.com/kandev/kandev/pkg/pluginsdk"
 	"github.com/stretchr/testify/require"
 
+	recipe "kandev-plugin-github-lite/recipes/source-control/server"
 	githublite "kandev-plugin-github-lite/server/githublite"
 )
 
@@ -465,11 +466,50 @@ func TestAutoAttachMatchesCheckoutBranch(t *testing.T) {
 	adapters := newTestAdapters(t, github, host)
 	ctx := githublite.WithWorkspaceID(context.Background(), "workspace-1")
 
+	// The first refresh discovers the open PR on the checkout branch, shows
+	// it, and persists it as the task's association (auto-link).
 	reviews, err := adapters.ForTask(ctx, "workspace-1", "task-9")
 	require.NoError(t, err)
 	require.Len(t, reviews, 1)
 	require.Equal(t, int64(7), reviews[0].ChangeRequestNumber)
 	require.Equal(t, "5001", reviews[0].RepositoryID)
+
+	value, found, err := host.GetState(ctx, "workspace", "workspace-1", "github_lite_task_associations:task-9")
+	require.NoError(t, err)
+	require.True(t, found, "auto-link should persist the association")
+	encoded, err := json.Marshal(value)
+	require.NoError(t, err)
+	var stored struct {
+		Associations []struct {
+			ConnectionScope string `json:"connection_scope"`
+			RepositoryID    string `json:"repository_id"`
+			Number          int64  `json:"number"`
+		} `json:"associations"`
+	}
+	require.NoError(t, json.Unmarshal(encoded, &stored))
+	require.Len(t, stored.Associations, 1)
+	require.Equal(t, "testuser", stored.Associations[0].ConnectionScope)
+	require.Equal(t, "5001", stored.Associations[0].RepositoryID)
+	require.Equal(t, int64(7), stored.Associations[0].Number)
+
+	// The next refresh is served from the stored association — no duplicate.
+	reviews, err = adapters.ForTask(ctx, "workspace-1", "task-9")
+	require.NoError(t, err)
+	require.Len(t, reviews, 1)
+
+	// Unlink tombstones the pull: even though the cached pulls?head= match
+	// keeps firing, the PR must not resurrect.
+	identity := recipe.ChangeRequestIdentity{ConnectionScope: "testuser", RepositoryID: "5001", Number: 7}
+	require.NoError(t, adapters.Unlink(ctx, "task-9", identity))
+	reviews, err = adapters.ForTask(ctx, "workspace-1", "task-9")
+	require.NoError(t, err)
+	require.Empty(t, reviews, "unlinked PR must stay off the task (tombstone)")
+
+	// A manual link clears the tombstone and brings it back.
+	require.NoError(t, adapters.Link(ctx, "task-9", identity))
+	reviews, err = adapters.ForTask(ctx, "workspace-1", "task-9")
+	require.NoError(t, err)
+	require.Len(t, reviews, 1)
 }
 
 func TestRateLimitRetriesOnce(t *testing.T) {

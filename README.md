@@ -23,10 +23,16 @@ https://github.com/user-attachments/assets/0376dc35-9047-4961-bfc7-5a074b3e2893
   reference. Linked PRs appear on the task's Reviews panel with live status:
   review state (approved / changes requested / pending), CI checks, comments,
   additions/deletions, and lifecycle (draft, merged, closed).
-- **Auto-attach by branch.** When a task is connected to a repository checkout
-  and has a checked-out branch, any *open* PR whose head matches that branch
-  shows up on the task automatically — resolved per refresh, no standing
-  loop.
+- **Auto-attach by branch (and auto-link).** When a task is connected to a
+  repository checkout and has a checked-out branch, any *open* PR whose head
+  matches that branch shows up on the task automatically — resolved per
+  refresh, no standing loop. A fresh match is also **persisted as the task's
+  association**: a PR an agent pushes and opens lights up the task's
+  linked-PR surfaces (icon, status, CI anatomy, unlink) on the next reviews
+  refresh — the same durable link a manual link writes, discovered with the
+  same one TTL-cached `pulls?head=` lookup auto-attach already makes. Unlink
+  tombstones the PR so a stale match never resurrects it; linking it again
+  clears the tombstone.
 - **Stays fresh while you watch.** A surface left open (task view, PR status
   strip) re-resolves every 60s while the window is visible, plus immediately
   on window focus, so a PR merged on GitHub shows up as merged instead of

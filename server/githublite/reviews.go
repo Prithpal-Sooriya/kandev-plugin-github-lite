@@ -304,10 +304,12 @@ func (a *Adapters) detailDocument(status *prStatus, repositoryID string, lifecyc
 	}
 }
 
-// ForTask returns the task's pull requests: the manually linked associations,
+// ForTask returns the task's pull requests: the linked associations,
 // plus (when auto-attach is enabled) open PRs whose head branch equals a
-// task repository's checkout branch. All fetches are TTL-cached; dedupe is
-// by immutable repository id + PR number.
+// task repository's checkout branch — each fresh match is persisted as the
+// task's association (auto-link), so it survives the refresh that found it.
+// All fetches are TTL-cached; dedupe is by immutable repository id + PR
+// number.
 func (a *Adapters) ForTask(ctx context.Context, workspaceID, taskID string) ([]recipe.ReviewSummary, error) {
 	if err := a.init(ctx); err != nil {
 		return nil, err
@@ -319,12 +321,12 @@ func (a *Adapters) ForTask(ctx context.Context, workspaceID, taskID string) ([]r
 	seen := make(map[string]bool)
 	summaries := make([]recipe.ReviewSummary, 0)
 
-	// 1. Manual associations first — they survive renames via numeric ids.
-	records, err := a.readAssociations(ctx, workspaceID, taskID)
+	// 1. Linked associations first — they survive renames via numeric ids.
+	document, err := a.readAssociationDocument(ctx, workspaceID, taskID)
 	if err != nil {
 		return nil, err
 	}
-	for _, record := range records {
+	for _, record := range document.Associations {
 		if _, err := strconv.ParseInt(record.RepositoryID, 10, 64); err != nil {
 			continue // not a github-lite identity (another provider's row)
 		}
@@ -368,7 +370,7 @@ func (a *Adapters) ForTask(ctx context.Context, workspaceID, taskID string) ([]r
 							continue
 						}
 					}
-					a.attachOpenHeadPRs(ctx, owner, name, taskRepo.CheckoutBranch, seen, &summaries)
+					a.attachOpenHeadPRs(ctx, workspaceID, taskID, owner, name, taskRepo.CheckoutBranch, document, seen, &summaries)
 				}
 			}
 		}
@@ -381,13 +383,24 @@ func (a *Adapters) ForTask(ctx context.Context, workspaceID, taskID string) ([]r
 }
 
 // attachOpenHeadPRs finds open PRs whose head is owner/name:branch (one core
-// REST call, cached) and appends unseen ones to summaries.
-func (a *Adapters) attachOpenHeadPRs(ctx context.Context, owner, name, branch string, seen map[string]bool, summaries *[]recipe.ReviewSummary) {
+// REST call, cached) and appends unseen ones to summaries. Each fresh match
+// is also persisted as a task association — the exact durable link a manual
+// change_requests.link writes — so a PR an agent pushed and opened lights up
+// the task's linked-PR surfaces instead of only appearing transiently in the
+// reviews panel. Persistence is idempotent (Link skips already-stored
+// identities) and best-effort: a failed write is logged and never fails the
+// reviews read. This keeps auto-linking pull-based: it runs inside the same
+// reviews refresh the host already triggers on panel mounts and freshness
+// sweeps, adds zero GitHub calls beyond the one pulls?head= lookup auto-attach
+// already makes, and never touches a task whose PR is not visible to the
+// configured token.
+func (a *Adapters) attachOpenHeadPRs(ctx context.Context, workspaceID, taskID, owner, name, branch string, document associationDocument, seen map[string]bool, summaries *[]recipe.ReviewSummary) {
 	var pulls []apiPullRequest
 	path := fmt.Sprintf("/repos/%s/%s/pulls?head=%s:%s&state=open&per_page=10", owner, name, owner, branch)
 	if err := a.client.getJSON(ctx, path, &pulls); err != nil {
 		return
 	}
+	var scope string
 	for _, pull := range pulls {
 		if pull.Number == 0 || pull.Head.Ref != branch {
 			continue
@@ -397,7 +410,7 @@ func (a *Adapters) attachOpenHeadPRs(ctx context.Context, owner, name, branch st
 			continue
 		}
 		key := repositoryID + "#" + strconv.FormatInt(pull.Number, 10)
-		if seen[key] {
+		if seen[key] || document.tombstoned(repositoryID, pull.Number) {
 			continue
 		}
 		status, err := a.loadPRStatus(ctx, owner, name, pull.Number)
@@ -406,6 +419,31 @@ func (a *Adapters) attachOpenHeadPRs(ctx context.Context, owner, name, branch st
 		}
 		seen[key] = true
 		*summaries = append(*summaries, a.toReviewSummary(ctx, status, repositoryID))
+
+		// Auto-link: persist the match as the task's association (same store
+		// as a manual link). The scope is resolved lazily on the first match so
+		// a branch with no open PR pays nothing extra.
+		if strings.TrimSpace(taskID) == "" {
+			continue
+		}
+		if scope == "" {
+			resolved, err := a.ConnectionScope(ctx, workspaceID)
+			if err != nil {
+				logger.Warn("auto-link skipped", "workspace", workspaceID, "task_id", taskID, "pr_number", pull.Number, "reason", "scope resolution failed", "error", err.Error())
+				continue
+			}
+			scope = resolved
+		}
+		identity := recipe.ChangeRequestIdentity{
+			ConnectionScope: scope,
+			RepositoryID:    repositoryID,
+			Number:         pull.Number,
+		}
+		if err := a.Link(ctx, taskID, identity); err != nil {
+			logger.Warn("auto-link persist failed", "workspace", workspaceID, "task_id", taskID, "pr_number", pull.Number, "error", err.Error())
+		} else {
+			logger.Info("auto-linked pull request to task", "workspace", workspaceID, "task_id", taskID, "repository_id", repositoryID, "pr_number", pull.Number, "head_branch", branch)
+		}
 	}
 }
 
