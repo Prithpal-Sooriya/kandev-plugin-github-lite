@@ -15,15 +15,28 @@ import (
 // (tree/<ref>, pull/N, blob path) — the slug is what matters.
 var githubURLPattern = regexp.MustCompile(`^(?:https?://)?(?:www\.)?github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?(?:/.*)?$`)
 
-// parseGitHubURL extracts owner/repo from a github.com URL or bare slug.
+// githubSSHURLPattern matches the ssh:// forms: ssh://git@github.com/o/r,
+// ssh://github.com/o/r, with the same trailing-path and .git tolerance.
+var githubSSHURLPattern = regexp.MustCompile(`^ssh://(?:[A-Za-z0-9_.-]+@)?github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?(?:/.*)?$`)
+
+// githubSCPURLPattern matches the scp-like git remote form
+// git@github.com:owner/repo(.git) that `git remote get-url origin` prints.
+var githubSCPURLPattern = regexp.MustCompile(`^(?:[A-Za-z0-9_.-]+@)?github\.com:([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?(?:/.*)?$`)
+
+// parseGitHubURL extracts owner/repo from a github.com URL or bare slug. SSH
+// and scp-like remote forms resolve to the same owner/repo as their HTTPS
+// twin: a remote_url copied from `git remote -v` must verify just like a
+// pasted web URL, not 404 against /repos/git@github.com:owner/repo.git.
 func parseGitHubURL(raw string) (owner, repo string, ok bool) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return "", "", false
 	}
-	// Prefer the regexp for URL forms; it also handles trailing paths.
-	if match := githubURLPattern.FindStringSubmatch(raw); match != nil {
-		return match[1], match[2], true
+	// URL forms first; they also tolerate trailing paths and .git suffixes.
+	for _, pattern := range []*regexp.Regexp{githubURLPattern, githubSSHURLPattern, githubSCPURLPattern} {
+		if match := pattern.FindStringSubmatch(raw); match != nil {
+			return match[1], match[2], true
+		}
 	}
 	// Bare "owner/repo" without a host.
 	parts := strings.SplitN(raw, "/", 2)
@@ -138,25 +151,31 @@ func (a *Adapters) List(ctx context.Context, workspaceID, query string, cursor r
 // (or to kandev's core integration when it is authenticated).
 func (a *Adapters) Inspect(ctx context.Context, workspaceID, rawURL string) (*recipe.Repository, error) {
 	if err := a.init(ctx); err != nil {
+		logger.Error("repository inspect", "workspace", workspaceID, "url", rawURL, "outcome", "error", "reason", "init failed", "error", err.Error())
 		return nil, err
 	}
 	owner, repo, ok := parseGitHubURL(rawURL)
 	if !ok {
+		logger.Info("repository inspect", "workspace", workspaceID, "url", rawURL, "outcome", "unclaimed")
 		return nil, nil
 	}
 	scope, err := a.ConnectionScope(ctx, workspaceID)
 	if err != nil {
+		logger.Error("repository inspect", "workspace", workspaceID, "url", rawURL, "outcome", "error", "reason", "resolving scope", "error", err.Error())
 		return nil, err
 	}
 	var payload apiRepository
 	if err := a.client.getJSON(ctx, "/repos/"+owner+"/"+repo, &payload); err != nil {
 		// Not owned: a 404 leaves payload untouched; surface other errors.
+		logger.Error("repository inspect", "workspace", workspaceID, "url", rawURL, "outcome", "error", "reason", "fetching repository", "error", err.Error())
 		return nil, err
 	}
 	if payload.ID == 0 {
+		logger.Info("repository inspect", "workspace", workspaceID, "url", rawURL, "outcome", "not visible to token")
 		return nil, nil // not found or not visible
 	}
 	inspected := repositoryFromAPI(payload, scope)
+	logger.Info("repository inspect", "workspace", workspaceID, "url", rawURL, "outcome", "claimed", "repository", owner+"/"+repo)
 	return &inspected, nil
 }
 

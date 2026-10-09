@@ -18,6 +18,13 @@ TTL-cached so refreshing a task costs nothing.
   and has a checked-out branch, any *open* PR whose head matches that branch
   shows up on the task automatically — resolved per refresh, no standing
   loop.
+- **Stays fresh while you watch.** A surface left open (task view, PR status
+  strip) re-resolves every 60s while the window is visible, plus immediately
+  on window focus, so a PR merged on GitHub shows up as merged instead of
+  staying stale until you navigate away and back. The server's TTL cache
+  absorbs the sweeps — refresh cadence never multiplies GitHub quota, it only
+  decides how quickly a TTL-expired change becomes visible. URL pickers
+  accept HTTPS and SSH (`git@github.com:owner/repo(.git)`) forms alike.
 - **Reference pull requests in chat.** Typing an `owner/repo#123` or PR URL
   reference in the composer resolves against GitHub; references fall back to
   listing open PRs across your workspace repositories (via ordinary repo

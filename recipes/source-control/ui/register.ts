@@ -9,6 +9,7 @@ import type {
   ReviewTaskStatus,
 } from "@kandev/plugin-sdk";
 import { createSnapshotStore } from "./review-store";
+import { startFreshnessLoop } from "./refresh-loop";
 
 /** ReviewSummary plus the optional provider-owned detail document the server
  * carries through the boundary (github-lite: the host ChangeRequestDetailModel
@@ -256,7 +257,21 @@ export function registerSourceControlRecipe(
   const associationStore = createSnapshotStore<string, ReviewTaskAssociation>();
   const overlays = new Set<{ close(): void }>();
 
+  // Visibility-gated freshness: re-refreshes the surfaces the host has
+  // already refreshed while the window is visible, so a PR merged on the
+  // forge shows up on the ticket instead of staying stale until the user
+  // navigates. The plugin server's TTL cache dedupes the GitHub traffic.
+  const freshness = startFreshnessLoop({
+    refreshTask: (taskId, workspaceId, signal) => {
+      void refreshReviews(taskId, signal, workspaceId).catch(() => undefined);
+    },
+    refreshWorkspace: (workspaceId, signal) => {
+      void refreshAssociations(workspaceId, signal).catch(() => undefined);
+    },
+  });
+
   async function refreshReviews(taskId: string, signal: AbortSignal, workspaceId?: string) {
+    freshness.noteTask(taskId, workspaceId);
     const token = reviewStore.beginRefresh(taskId);
     signal.throwIfAborted();
     const response = await host.api.invokeAction<ReviewListResponse>(
@@ -276,6 +291,7 @@ export function registerSourceControlRecipe(
   }
 
   async function refreshAssociations(workspaceId: string, signal: AbortSignal) {
+    freshness.noteWorkspace(workspaceId);
     const token = associationStore.beginRefresh(workspaceId);
     signal.throwIfAborted();
     const response = await host.api.invokeAction<ReviewAssociationListResponse>(
@@ -498,6 +514,7 @@ export function registerSourceControlRecipe(
   });
   return {
     destroy() {
+      freshness.stop();
       overlays.forEach((overlay) => overlay.close());
       overlays.clear();
       reviewStore.clear();

@@ -10,7 +10,7 @@ deps:
 # BIN and VERSION must match manifest.yaml's id and version (PKG_OUT is
 # derived from them).
 BIN := bin/kandev-plugin-github-lite
-VERSION := 0.1.1
+VERSION := 0.1.2
 STAGE := .build/stage
 PKG_OUT := $(notdir $(BIN))-$(VERSION).tar.gz
 
@@ -30,7 +30,7 @@ KANDEV_SDK := ../kandev-sdk/apps/backend
 ## itself always installs from `make package`/`package-host` output, not this.
 build:
 	mkdir -p bin
-	go build -o $(BIN) ./server/...
+	go build -o $(BIN) ./server
 
 ## Build + run. Mainly for -race / manual smoke checks: kandev normally spawns
 ## this binary itself via the go-plugin handshake, so a manually-started
