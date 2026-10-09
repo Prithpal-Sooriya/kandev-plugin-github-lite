@@ -9,9 +9,10 @@ TTL-cached so refreshing a task costs nothing.
 
 ## Walkthrough
 
-A short walkthrough of how the plugin is put together: the recipe, the GitHub adapters, the cache, and the browser half.
+A short walkthrough of how the plugin is put together: the recipe, the GitHub
+adapters, the cache, and the browser half.
 
-[how-github-lite-works.mp4](docs/how-github-lite-works.mp4)
+https://github.com/user-attachments/assets/0376dc35-9047-4961-bfc7-5a074b3e2893
 
 > 🤖 AI-generated walkthrough — script, animation, and voice made by an agent
 
