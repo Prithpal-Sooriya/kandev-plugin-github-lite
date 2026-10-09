@@ -101,6 +101,10 @@ copy_fixture corrupt-ui
 printf '// changed after checksum generation\n' >> "$test_dir/corrupt-ui/ui/bundle.js"
 expect_failure 'corrupt UI contents' "$test_dir/corrupt-ui"
 
+copy_fixture bad-category
+printf 'categories: ["integrations", "tools"]\n' >> "$test_dir/bad-category/manifest.yaml"
+expect_failure 'an unknown manifest category' "$test_dir/bad-category"
+
 copy_fixture incomplete-checksums
 sed '/  ui\/bundle.js$/d' "$test_dir/incomplete-checksums/checksums.txt" > "$test_dir/incomplete-checksums/checksums.next"
 mv "$test_dir/incomplete-checksums/checksums.next" "$test_dir/incomplete-checksums/checksums.txt"

@@ -31,6 +31,24 @@ manifest_executables=$(awk '
 		print platform " " path
 	}
 ' "$package_dir/manifest.yaml" | LC_ALL=C sort)
+
+# Categories are validated against kandev's install-time enum (kandev apps/
+# backend internal/plugins/manifest/validate.go: validCategories). The 0.1.0
+# package shipped category "integrations", which the host rejected with 400
+# `unknown category "integrations"` — plugin-pack only parses the manifest,
+# it does not run full Validate, so this check closes that gap for the one
+# rule that bit. When present, categories must use the inline
+# `categories: ["a", "b"]` spelling this parser understands.
+if grep -qE '^categories:' "$package_dir/manifest.yaml"; then
+	manifest_categories=$(sed -nE 's/^categories: *\[(.*)\]$/\1/p' "$package_dir/manifest.yaml")
+	[ -n "$manifest_categories" ] || fail 'categories: must use the inline ["a", "b"] spelling'
+	for category in $(printf '%s\n' "$manifest_categories" | tr ',' ' ' | tr -d '"'); do
+		case "$category" in
+			connector | automation | tools | analytics | canvas) ;;
+			*) fail "unknown manifest category: $category" ;;
+		esac
+	done
+fi
 expected_executables=$(printf '%s\n' \
 	'darwin-amd64 server/plugin-darwin-amd64' \
 	'darwin-arm64 server/plugin-darwin-arm64' \
