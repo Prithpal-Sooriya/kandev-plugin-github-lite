@@ -27,11 +27,16 @@ const (
 
 // Repository holds credential-free provider identity and display/routing data.
 // RepositoryID must be the provider's immutable identifier; Name is display only.
+// The JSON key for RepositoryID is `provider_repository_id`: kandev's backend
+// decodes repository-provider inspections with exactly these keys and rejects
+// the response as invalid when its repository id decodes empty — the plugin's
+// own recipe UI accepts the legacy `repository_id` spelling too, but the host
+// validator does not.
 type Repository struct {
 	ProviderID      string `json:"provider_id"`
 	ProviderHost    string `json:"provider_host"`
 	ConnectionScope string `json:"provider_scope"`
-	RepositoryID    string `json:"repository_id"`
+	RepositoryID    string `json:"provider_repository_id"`
 	OwnerOrProject  string `json:"owner_or_project"`
 	Name            string `json:"name"`
 	CloneURL        string `json:"clone_url"`
