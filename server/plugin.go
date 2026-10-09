@@ -23,6 +23,8 @@ var _ pluginsdk.Plugin = (*githubLitePlugin)(nil)
 var _ pluginsdk.ActionHandler = (*githubLitePlugin)(nil)
 var _ pluginsdk.EntityReferenceSearcher = (*githubLitePlugin)(nil)
 var _ pluginsdk.EntityReferenceAuthorizer = (*githubLitePlugin)(nil)
+var _ pluginsdk.GitCredentialResolver = (*githubLitePlugin)(nil)
+var _ pluginsdk.GitCredentialBinder = (*githubLitePlugin)(nil)
 
 func newPlugin() *githubLitePlugin {
 	plugin := &githubLitePlugin{}
@@ -60,6 +62,23 @@ func (p *githubLitePlugin) SearchEntityReferences(ctx context.Context, request *
 		ctx = githublite.WithWorkspaceID(ctx, request.WorkspaceID)
 	}
 	return p.extension.SearchEntityReferences(ctx, request)
+}
+
+// ResolveGitCredential serves the host's github.com HTTPS clone
+// authentication from the configured token. Without this extension kandev
+// fails every clone of a repository this provider owns with "plugin does not
+// implement git credential resolver" — repository providers own clone
+// credentials for the hosts they claim.
+func (p *githubLitePlugin) ResolveGitCredential(ctx context.Context, request *pluginsdk.ResolveGitCredentialRequest) (*pluginsdk.ResolveGitCredentialResponse, error) {
+	return p.adapters.ResolveGitCredential(ctx, request)
+}
+
+// GetGitCredentialBinding serves the non-secret lease revision for the
+// host's credential-lease validation: kandev revokes already-issued clone
+// leases when the binding changes (or is empty), so a token rotation
+// invalidates leases without re-reading the secret.
+func (p *githubLitePlugin) GetGitCredentialBinding(ctx context.Context, request *pluginsdk.GitCredentialBindingRequest) (*pluginsdk.GitCredentialBindingResponse, error) {
+	return p.adapters.GetGitCredentialBinding(ctx, request)
 }
 
 // AuthorizeEntityReference delegates to the recipe's reference authorization.

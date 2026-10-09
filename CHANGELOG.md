@@ -4,6 +4,20 @@ All notable changes to this plugin are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com); versions match
 `manifest.yaml` (and the `Makefile`).
 
+## [0.1.4] — 2026-02-04
+
+### Fixed
+
+- Task agents failed to start with "resolve workspace Git credential: resolve
+  plugin Git credential: plugin does not implement git credential resolver":
+  kandev resolves clone credentials for a repository by asking the plugin that
+  owns the repository provider, and fails closed when that plugin does not
+  implement the Git credential extension. The plugin now implements it: github.com
+  clones authenticate with the configured token (username `x-access-token`,
+  secret never logged or persisted, only github.com hosts served), and lease
+  validation gets a non-secret token digest whose change (a token rotation
+  restarts the plugin) revokes already-issued clone leases.
+
 ## [0.1.3] — 2026-02-04
 
 ### Fixed

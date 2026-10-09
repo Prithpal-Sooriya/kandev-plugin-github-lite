@@ -10,7 +10,7 @@ deps:
 # BIN and VERSION must match manifest.yaml's id and version (PKG_OUT is
 # derived from them).
 BIN := bin/kandev-plugin-github-lite
-VERSION := 0.1.3
+VERSION := 0.1.4
 STAGE := .build/stage
 PKG_OUT := $(notdir $(BIN))-$(VERSION).tar.gz
 
