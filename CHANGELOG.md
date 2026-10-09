@@ -4,6 +4,19 @@ All notable changes to this plugin are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com); versions match
 `manifest.yaml` (and the `Makefile`).
 
+## [0.1.1] — 2026-02-04
+
+### Fixed
+
+- Manifest declared category "integrations", which kandev's install-time
+  manifest validation rejects (`unknown category "integrations"` — the
+  allowed enum is connector / automation / tools / analytics / canvas).
+  v0.1.0 tarballs could not install at all; categories are now
+  `connector, tools`. `scripts/verify-package.sh` gained an allowlist check
+  so a bad category can never ship again.
+
+## [0.1.0] — 2026-02-04
+
 ## [0.1.0] — 2026-02-04
 
 ### Added
