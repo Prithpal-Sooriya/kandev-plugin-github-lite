@@ -82,6 +82,9 @@ actions:
   - key: "change_requests.get"
     scope: "task"
     max_body_bytes: 1024
+  - key: "change_requests.sync"
+    scope: "task"
+    max_body_bytes: 1024
   - key: "change_requests.link"
     scope: "task"
     max_body_bytes: 16384
