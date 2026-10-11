@@ -44,6 +44,15 @@ https://github.com/user-attachments/assets/0376dc35-9047-4961-bfc7-5a074b3e2893
   survive — and the sync itself costs no GitHub calls beyond the re-reads
   (~one lookup plus a handful of detail reads per linked PR), paid once per
   press, never on a schedule.
+  Sync also closes the branch-switch gap: the host records a task's checkout
+  branch only at creation, so an agent that switched branches mid-session
+  leaves the recorded branch stale or absent and the branch-matched
+  auto-attach blind to the agent's PRs. The sync press additionally links
+  the task repositories' open PRs that were authored by the configured
+  token's owner, created after the task was created, and associated with no
+  task in the workspace. Anything that heuristic grabs wrongly is unlinked
+  once and stays unlinked (the tombstone wins); cost is one open-PRs listing
+  per repository, paid only on an explicit press.
 - **Stays fresh while you watch.** A surface left open (task view, PR status
   strip) re-resolves every 60s while the window is visible, plus immediately
   on window focus, so a PR merged on GitHub shows up as merged instead of

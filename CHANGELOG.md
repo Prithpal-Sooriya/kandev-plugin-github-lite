@@ -4,6 +4,25 @@ All notable changes to this plugin are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com); versions match
 `manifest.yaml` (and the `Makefile`).
 
+## [0.1.9] — Sync discovery for branch-switched tasks
+
+The host records a task's checkout branch only at task creation. When an
+agent switches branches mid-session (the normal pattern: create branch,
+work, push, open PR), the recorded branch is stale or absent and the
+branch-matched auto-attach cannot see the agent's PRs — the sync button
+then linked nothing, which looked like "sync doesn't work" on tasks with
+multiple agent-created PRs. The sync press now also links each task
+repository's open PRs that were **authored by the configured token's
+owner, created after the task was created, and associated with no task in
+the workspace**. Anything the heuristic grabs wrongly is unlinked once and
+stays unlinked (the unlink tombstone wins). One open-PRs listing per
+repository, paid only on an explicit sync press — background refreshes stay
+fully TTL-absorbed.
+
+### Fixed
+- Sync on a task whose agent switched branches (no recorded checkout branch) now discovers and persists the agent's PRs.
+- Sync no longer needs a recorded checkout branch to discover new work.
+
 ## [0.1.8] — 2026-02-04
 
 ### Added

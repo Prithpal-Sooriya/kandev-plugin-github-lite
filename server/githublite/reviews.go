@@ -400,6 +400,11 @@ func (a *Adapters) ForTask(ctx context.Context, workspaceID, taskID string) ([]r
 // pulls?head= branch lookups and PR detail reads); every other cached entry
 // survives, and background refreshes stay fully TTL-absorbed — freshness
 // here is user intent, paid once per press, never on a timer.
+//
+// It also runs the sync-only author discovery below: for tasks whose agent
+// switched branches mid-session, the recorded checkout branch is stale or
+// absent and the branch-matched auto-attach is blind to the agent's PRs —
+// the sync press links them by authorship instead.
 func (a *Adapters) SyncTask(ctx context.Context, workspaceID, taskID string) ([]recipe.ReviewSummary, error) {
 	if err := a.init(ctx); err != nil {
 		return nil, err
@@ -408,17 +413,101 @@ func (a *Adapters) SyncTask(ctx context.Context, workspaceID, taskID string) ([]
 		return nil, fmt.Errorf("github-lite: task review sync requires workspace and task")
 	}
 	if host := a.host(); host != nil {
-		a.forgetTaskRepositories(ctx, host, workspaceID, taskID)
+		slugs := a.taskRepositorySlugs(ctx, host, workspaceID, taskID)
+		for slug := range slugs {
+			a.client.forgetPathPrefix("/repos/" + slug + "/")
+		}
+		a.discoverUnlinkedAuthorPRs(ctx, host, workspaceID, taskID, slugs)
 	}
 	return a.ForTask(ctx, workspaceID, taskID)
 }
 
-// forgetTaskRepositories drops the cached GitHub paths of one task's
+// discoverUnlinkedAuthorPRs links the task's repositories' open PRs that the
+// configured token authored, that were created after the task, and that are
+// associated with no task in the workspace (nor tombstoned on this one).
+// It is the sync-only fallback for branch-switched tasks: the host records a
+// task's checkout branch only at creation, so an agent that switched
+// branches mid-session leaves the recorded branch stale or absent and the
+// branch-matched auto-attach blind to the agent's PRs. The guards keep the
+// heuristic honest (the agent pushes as the token owner and its PRs postdate
+// the task), it runs only on an explicit sync press — never on a background
+// refresh — and costs one open-PRs listing per repository. Anything it
+// grabs wrongly is unlinked once and stays unlinked: the tombstone wins.
+func (a *Adapters) discoverUnlinkedAuthorPRs(ctx context.Context, host pluginsdk.Host, workspaceID, taskID string, slugs map[string]bool) {
+	scope, err := a.ConnectionScope(ctx, workspaceID)
+	if err != nil || scope == "" {
+		return
+	}
+	task, err := host.Tasks().Get(ctx, taskID)
+	if err != nil || task == nil {
+		return
+	}
+	taskCreated, err := time.Parse(time.RFC3339, strings.TrimSpace(task.CreatedAt))
+	if err != nil {
+		return // no creation time to guard the heuristic with: stay blind
+	}
+
+	linked := make(map[string]bool) // "repositoryID#number" across the workspace
+	if associations, err := a.Associations(ctx, workspaceID); err == nil {
+		for _, association := range associations {
+			linked[association.RepositoryID+"#"+strconv.FormatInt(association.ChangeRequestNumber, 10)] = true
+		}
+	}
+	document, err := a.readAssociationDocument(ctx, workspaceID, taskID)
+	if err != nil {
+		document = associationDocument{TaskID: taskID}
+	}
+
+	for slug := range slugs {
+		owner, name, ok := strings.Cut(slug, "/")
+		if !ok || owner == "" || name == "" {
+			continue
+		}
+		var pulls []apiPullRequest
+		path := fmt.Sprintf("/repos/%s/%s/pulls?state=open&sort=created&direction=desc&per_page=20", owner, name)
+		if err := a.client.getJSON(ctx, path, &pulls); err != nil {
+			continue
+		}
+		for _, pull := range pulls {
+			if pull.Number == 0 || pull.State != "open" {
+				continue
+			}
+			if pull.User.Login == "" || !strings.EqualFold(pull.User.Login, scope) {
+				continue // not authored by the configured token's owner
+			}
+			if pull.CreatedAt == nil || pull.CreatedAt.Before(taskCreated) {
+				continue // older than the task: predates this work
+			}
+			repositoryID := strconv.FormatInt(pull.Base.Repo.ID, 10)
+			if repositoryID == "0" {
+				continue
+			}
+			key := repositoryID + "#" + strconv.FormatInt(pull.Number, 10)
+			if linked[key] || document.tombstoned(repositoryID, pull.Number) {
+				continue // linked anywhere, or unlinked on purpose
+			}
+			identity := recipe.ChangeRequestIdentity{
+				ConnectionScope: scope,
+				RepositoryID:    repositoryID,
+				Number:         pull.Number,
+			}
+			if err := a.Link(ctx, taskID, identity); err != nil {
+				logger.Warn("sync-link persist failed", "workspace", workspaceID, "task_id", taskID, "pr_number", pull.Number, "error", err.Error())
+				continue
+			}
+			linked[key] = true
+			logger.Info("sync-linked pull request to task", "workspace", workspaceID, "task_id", taskID, "repository_id", repositoryID, "pr_number", pull.Number, "head_branch", pull.Head.Ref, "author", pull.User.Login)
+		}
+	}
+}
+
+// taskRepositorySlugs enumerates the GitHub slugs of one task's
 // repositories. Linked associations contribute their repos (the PR detail
 // reads); task repo rows contribute theirs (the checkout-branch discovery
 // lookup). Slug resolution uses the same host-data-only enumeration the
-// reviews refresh uses, so the sync itself costs no GitHub calls.
-func (a *Adapters) forgetTaskRepositories(ctx context.Context, host pluginsdk.Host, workspaceID, taskID string) {
+// reviews refresh uses, so a sync itself costs no GitHub calls before the
+// forgetting and discovery that follow it.
+func (a *Adapters) taskRepositorySlugs(ctx context.Context, host pluginsdk.Host, workspaceID, taskID string) map[string]bool {
 	slugs := make(map[string]bool)
 
 	if document, err := a.readAssociationDocument(ctx, workspaceID, taskID); err == nil {
@@ -455,9 +544,7 @@ func (a *Adapters) forgetTaskRepositories(ctx context.Context, host pluginsdk.Ho
 		}
 	}
 
-	for slug := range slugs {
-		a.client.forgetPathPrefix("/repos/" + slug + "/")
-	}
+	return slugs
 }
 
 // attachOpenHeadPRs finds open PRs whose head is owner/name:branch (one core
