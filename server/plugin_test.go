@@ -175,15 +175,36 @@ func newFakeGitHub(t *testing.T) *fakeGitHub {
 }
 
 func (f *fakeGitHub) addPull(owner, repo string, number int, head, base string) {
+	f.addPullWithDetails(owner, repo, number, head, base, "alice", "", 5001)
+}
+
+// addPullWithDetails registers a pull with an explicit author, created_at,
+// and repository id — for tests that exercise the author/recency-guarded
+// sync discovery.
+func (f *fakeGitHub) addPullWithDetails(owner, repo string, number int, head, base, author, createdAt string, repositoryID int64) {
 	key := fmt.Sprintf("%s/%s#%d", owner, repo, number)
-	f.pulls[key] = map[string]any{
+	pull := map[string]any{
 		"number": number, "state": "open", "title": fmt.Sprintf("PR %d", number),
 		"html_url":  fmt.Sprintf("https://github.com/%s/%s/pull/%d", owner, repo, number),
-		"user":      map[string]any{"login": "alice"},
-		"head":      map[string]any{"ref": head, "sha": "abc123", "repo": map[string]any{"id": 5001, "full_name": owner + "/" + repo}},
-		"base":      map[string]any{"ref": base, "repo": map[string]any{"id": 5001, "full_name": owner + "/" + repo}},
+		"user":      map[string]any{"login": author},
+		"head":      map[string]any{"ref": head, "sha": "abc123", "repo": map[string]any{"id": repositoryID, "full_name": owner + "/" + repo}},
+		"base":      map[string]any{"ref": base, "repo": map[string]any{"id": repositoryID, "full_name": owner + "/" + repo}},
 		"additions": 10, "deletions": 2, "mergeable": true,
 	}
+	if createdAt != "" {
+		pull["created_at"] = createdAt
+	}
+	f.pulls[key] = pull
+}
+
+// addRepository registers a second repository on the fake.
+func (f *fakeGitHub) addRepository(owner, repo string, id int64) {
+	f.repos = append(f.repos, map[string]any{
+		"id": id, "name": repo, "full_name": owner + "/" + repo,
+		"owner": map[string]any{"login": owner},
+		"clone_url": fmt.Sprintf("https://github.com/%s/%s.git", owner, repo),
+		"default_branch": "main",
+	})
 }
 
 func (f *fakeGitHub) record(path string) {
@@ -585,6 +606,114 @@ func TestSyncTaskDiscoversNewlyOpenedPR(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, reviews, 1, "stored association survives the sync")
 	require.Equal(t, base, github.countRequests(lookup), "post-sync refresh stays cache-served")
+}
+
+func TestSyncTaskDiscoversAuthorPRsWithoutCheckoutBranch(t *testing.T) {
+	github := newFakeGitHub(t)
+	github.addRepository("acme", "gadgets", 5002)
+	host := newFakeHost(nil)
+	branch := "main"
+	host.repos = []pluginsdk.Repository{
+		{
+			ID: "row-1", WorkspaceID: "workspace-1", Name: "widgets",
+			ProviderID: "github", ProviderHost: "github.com", OwnerOrProject: "acme",
+			RemoteURL: "https://github.com/acme/widgets.git", DefaultBranch: &branch,
+		},
+		{
+			ID: "row-2", WorkspaceID: "workspace-1", Name: "gadgets",
+			ProviderID: "github", ProviderHost: "github.com", OwnerOrProject: "acme",
+			RemoteURL: "https://github.com/acme/gadgets.git", DefaultBranch: &branch,
+		},
+	}
+	// The agent switched branches mid-session: no recorded checkout branch on
+	// either repo row (the host only records checkout branches at creation).
+	host.tasks["task-9"] = &pluginsdk.Task{
+		ID: "task-9", WorkspaceID: "workspace-1", CreatedAt: "2026-02-01T10:00:00Z",
+		Repositories: []pluginsdk.TaskRepository{{RepositoryID: "row-1"}, {RepositoryID: "row-2"}},
+	}
+
+	// The agent's PR after task creation, authored by the token owner: the
+	// one a sync should discover and link.
+	github.addPullWithDetails("acme", "widgets", 7, "feature/agent", "main", "testuser", "2026-02-02T10:00:00Z", 5001)
+	// Created BEFORE the task: predates this work, never linked.
+	github.addPullWithDetails("acme", "gadgets", 8, "feature/old", "main", "testuser", "2026-01-01T10:00:00Z", 5002)
+	// Authored by someone else: not this agent's work.
+	github.addPullWithDetails("acme", "widgets", 9, "feature/other", "main", "someone-else", "2026-02-03T10:00:00Z", 5001)
+	// The token owner's recent PR — but already linked to another task.
+	github.addPullWithDetails("acme", "gadgets", 10, "feature/z", "main", "testuser", "2026-02-03T11:00:00Z", 5002)
+
+	adapters := newTestAdapters(t, github, host)
+	ctx := githublite.WithWorkspaceID(context.Background(), "workspace-1")
+	identity10 := recipe.ChangeRequestIdentity{ConnectionScope: "testuser", RepositoryID: "5002", Number: 10}
+	require.NoError(t, adapters.Link(ctx, "task-8", identity10))
+
+	// A background refresh finds nothing: no checkout branches, no stored
+	// links — the branch-matched auto-attach is blind after a branch switch.
+	reviews, err := adapters.ForTask(ctx, "workspace-1", "task-9")
+	require.NoError(t, err)
+	require.Empty(t, reviews)
+	require.Equal(t, 0, github.countRequests("pulls?head="), "no recorded branches: no branch lookups")
+
+	// The sync press discovers by authorship: PR #7 is linked, the old PR,
+	// the other author's PR, and another task's PR are all left alone.
+	reviews, err = adapters.SyncTask(ctx, "workspace-1", "task-9")
+	require.NoError(t, err)
+	require.Len(t, reviews, 1)
+	require.Equal(t, int64(7), reviews[0].ChangeRequestNumber)
+	require.Equal(t, "5001", reviews[0].RepositoryID)
+	require.Equal(t, "testuser", reviews[0].ConnectionScope)
+	require.GreaterOrEqual(t, github.countRequests("/repos/acme/widgets/pulls?state=open"), 1, "one listing per repo")
+	require.GreaterOrEqual(t, github.countRequests("/repos/acme/gadgets/pulls?state=open"), 1, "one listing per repo")
+
+	// The stored association is exactly the discovered PR; the other task's
+	// association is untouched.
+	value, found, err := host.GetState(ctx, "workspace", "workspace-1", "github_lite_task_associations:task-9")
+	require.NoError(t, err)
+	require.True(t, found)
+	stored, _ := json.Marshal(value)
+	require.Contains(t, string(stored), `"number":7`)
+	require.NotContains(t, string(stored), `"number":8`)
+	require.NotContains(t, string(stored), `"number":9`)
+	require.NotContains(t, string(stored), `"number":10`)
+	_, found, err = host.GetState(ctx, "workspace", "workspace-1", "github_lite_task_associations:task-8")
+	require.NoError(t, err)
+	require.True(t, found, "the other task's association must survive the sync")
+
+	// A later background refresh serves the sync's link from the store.
+	base := github.countRequests("/repos/acme/widgets/pulls?state=open")
+	reviews, err = adapters.ForTask(ctx, "workspace-1", "task-9")
+	require.NoError(t, err)
+	require.Len(t, reviews, 1, "the sync's link sticks without further lookups")
+	require.Equal(t, base, github.countRequests("/repos/acme/widgets/pulls?state=open"))
+}
+
+func TestSyncDiscoveryNeverResurrectsUnlinkedPR(t *testing.T) {
+	github := newFakeGitHub(t)
+	host := newFakeHost(nil)
+	branch := "main"
+	host.repos = []pluginsdk.Repository{{
+		ID: "row-1", WorkspaceID: "workspace-1", Name: "widgets",
+		ProviderID: "github", ProviderHost: "github.com", OwnerOrProject: "acme",
+		RemoteURL: "https://github.com/acme/widgets.git", DefaultBranch: &branch,
+	}}
+	host.tasks["task-9"] = &pluginsdk.Task{
+		ID: "task-9", WorkspaceID: "workspace-1", CreatedAt: "2026-02-01T10:00:00Z",
+		Repositories: []pluginsdk.TaskRepository{{RepositoryID: "row-1"}},
+	}
+	github.addPullWithDetails("acme", "widgets", 7, "feature/agent", "main", "testuser", "2026-02-02T10:00:00Z", 5001)
+
+	adapters := newTestAdapters(t, github, host)
+	ctx := githublite.WithWorkspaceID(context.Background(), "workspace-1")
+
+	// A sync grabs the author-matched PR, the user unlinks it, and a later
+	// sync must not resurrect it — the tombstone wins.
+	_, err := adapters.SyncTask(ctx, "workspace-1", "task-9")
+	require.NoError(t, err)
+	identity := recipe.ChangeRequestIdentity{ConnectionScope: "testuser", RepositoryID: "5001", Number: 7}
+	require.NoError(t, adapters.Unlink(ctx, "task-9", identity))
+	reviews, err := adapters.SyncTask(ctx, "workspace-1", "task-9")
+	require.NoError(t, err)
+	require.Empty(t, reviews, "unlinked PR must stay off the task across syncs")
 }
 
 func TestRateLimitRetriesOnce(t *testing.T) {
