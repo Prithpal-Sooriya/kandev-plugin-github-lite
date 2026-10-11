@@ -4,6 +4,21 @@ All notable changes to this plugin are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com); versions match
 `manifest.yaml` (and the `Makefile`).
 
+## [0.1.7] — 2026-02-04
+
+### Fixed
+
+- **Auto-link latency**: the auto-attach branch lookup (`pulls?head=`) cached
+  its **empty** answer for the full default TTL (5 minutes), so a PR an agent
+  opened could take up to that long to appear even while actively watching
+  the task. Empty answers now expire after **45 seconds** — deliberately
+  under the UI freshness sweep's 60s cadence — so a freshly opened PR is
+  picked up by the next sweep while the task is being watched. Bounded cost:
+  one re-check per sweep per actively watched task that still has no open PR
+  on its branch; non-empty answers (PR found, or linked PRs) keep the normal
+  TTL, and bursts inside either window are deduped so cadence never
+  multiplies quota.
+
 ## [0.1.6] — 2026-02-04
 
 ### Added
