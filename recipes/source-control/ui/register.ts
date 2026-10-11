@@ -435,6 +435,30 @@ export function registerSourceControlRecipe(
 
   registry.registerRepositoryProvider(repositoryProvider);
   registry.registerTaskAction({
+    id: `${options.providerId}-sync-change-requests`,
+    label: `Sync ${options.label} ${options.changeRequestNoun}s`,
+    ...(options.icon ? { icon: options.icon } : {}),
+    placement: "link",
+    singleTaskOnly: true,
+    async run(context) {
+      // The server drops this task's cached reads (branch lookup + linked
+      // PR details) and re-runs the refresh, so a PR opened seconds ago is
+      // discovered and auto-linked now instead of at the next TTL expiry.
+      // Background refreshes stay fully cache-absorbed: freshness here is
+      // user intent, paid once per press. TaskContext carries no abort
+      // signal, so the trailing optional refresh runs on a fresh one.
+      await host.api.invokeAction("change_requests.sync", {
+        workspaceId: context.workspaceId,
+        taskId: context.taskId,
+      });
+      await refreshAfterMutation(
+        context.workspaceId,
+        context.taskId,
+        new AbortController().signal,
+      );
+    },
+  });
+  registry.registerTaskAction({
     id: `${options.providerId}-link-change-request`,
     label: `${options.label} ${options.changeRequestNoun}`,
     ...(options.icon ? { icon: options.icon } : {}),

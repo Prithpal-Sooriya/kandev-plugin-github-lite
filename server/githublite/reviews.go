@@ -14,14 +14,6 @@ import (
 	recipe "kandev-plugin-github-lite/recipes/source-control/server"
 )
 
-// autoAttachEmptyTTL is how long an EMPTY auto-attach branch lookup
-// ("no open PR on this branch yet") stays cached. It is deliberately under
-// the UI freshness sweep's 60s cadence so every sweep re-checks a branch
-// that still has no PR — a PR the agent opens is picked up within one sweep
-// instead of one default TTL (5 minutes). Bounded cost: one call per sweep
-// per actively watched PR-less task; non-empty answers cache normally.
-const autoAttachEmptyTTL = 45 * time.Second
-
 // prStatus bundles everything one PR read fetches. The PR payload itself is
 // cached; the reviews/checks/comments fetches are separate cache entries, so
 // a task with two linked PRs visible for ten minutes costs a fixed handful of
@@ -400,6 +392,74 @@ func (a *Adapters) ForTask(ctx context.Context, workspaceID, taskID string) ([]r
 	return summaries, nil
 }
 
+// SyncTask is the explicit refresh behind the manual "Sync pull requests"
+// task action: it drops this task's cached GitHub reads and then runs the
+// normal reviews refresh, so the next reads hit GitHub — a PR the agent
+// opened seconds ago is discovered and auto-linked now, not at the next TTL
+// expiry. Forgetting is scoped to this task's repositories (their
+// pulls?head= branch lookups and PR detail reads); every other cached entry
+// survives, and background refreshes stay fully TTL-absorbed — freshness
+// here is user intent, paid once per press, never on a timer.
+func (a *Adapters) SyncTask(ctx context.Context, workspaceID, taskID string) ([]recipe.ReviewSummary, error) {
+	if err := a.init(ctx); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(workspaceID) == "" || strings.TrimSpace(taskID) == "" {
+		return nil, fmt.Errorf("github-lite: task review sync requires workspace and task")
+	}
+	if host := a.host(); host != nil {
+		a.forgetTaskRepositories(ctx, host, workspaceID, taskID)
+	}
+	return a.ForTask(ctx, workspaceID, taskID)
+}
+
+// forgetTaskRepositories drops the cached GitHub paths of one task's
+// repositories. Linked associations contribute their repos (the PR detail
+// reads); task repo rows contribute theirs (the checkout-branch discovery
+// lookup). Slug resolution uses the same host-data-only enumeration the
+// reviews refresh uses, so the sync itself costs no GitHub calls.
+func (a *Adapters) forgetTaskRepositories(ctx context.Context, host pluginsdk.Host, workspaceID, taskID string) {
+	slugs := make(map[string]bool)
+
+	if document, err := a.readAssociationDocument(ctx, workspaceID, taskID); err == nil {
+		for _, record := range document.Associations {
+			if _, parseErr := strconv.ParseInt(record.RepositoryID, 10, 64); parseErr != nil {
+				continue // not a github-lite identity
+			}
+			if owner, name, err := a.repoSlugByID(ctx, record.RepositoryID); err == nil {
+				slugs[owner+"/"+name] = true
+			}
+		}
+	}
+
+	if task, err := host.Tasks().Get(ctx, taskID); err == nil && task != nil {
+		if rows, err := a.workspaceRepositories(ctx, host, workspaceID); err == nil {
+			byID := make(map[string]pluginsdk.Repository, len(rows))
+			for _, row := range rows {
+				byID[row.ID] = row
+			}
+			for _, taskRepo := range task.Repositories {
+				row, found := byID[taskRepo.RepositoryID]
+				if !found {
+					continue
+				}
+				owner, name, ok := parseGitHubURL(row.RemoteURL)
+				if !ok {
+					owner, name = row.OwnerOrProject, row.Name
+					if owner == "" || name == "" {
+						continue
+					}
+				}
+				slugs[owner+"/"+name] = true
+			}
+		}
+	}
+
+	for slug := range slugs {
+		a.client.forgetPathPrefix("/repos/" + slug + "/")
+	}
+}
+
 // attachOpenHeadPRs finds open PRs whose head is owner/name:branch (one core
 // REST call, cached) and appends unseen ones to summaries. Each fresh match
 // is also persisted as a task association — the exact durable link a manual
@@ -415,13 +475,7 @@ func (a *Adapters) ForTask(ctx context.Context, workspaceID, taskID string) ([]r
 func (a *Adapters) attachOpenHeadPRs(ctx context.Context, workspaceID, taskID, owner, name, branch string, document associationDocument, seen map[string]bool, summaries *[]recipe.ReviewSummary) {
 	var pulls []apiPullRequest
 	path := fmt.Sprintf("/repos/%s/%s/pulls?head=%s:%s&state=open&per_page=10", owner, name, owner, branch)
-	// An EMPTY answer is cached only briefly (autoAttachEmptyTTL, well under
-	// the UI freshness sweep's 60s cadence) so a PR the agent opens is picked
-	// up on the next sweep instead of being masked by a long-lived negative
-	// cache entry; a non-empty answer caches like everything else. The cost
-	// is bounded: one re-check per sweep per actively watched task, only
-	// while the branch still has no open PR.
-	if err := a.client.getJSONEmptyTTL(ctx, path, &pulls, autoAttachEmptyTTL); err != nil {
+	if err := a.client.getJSON(ctx, path, &pulls); err != nil {
 		return
 	}
 	for _, pull := range pulls {

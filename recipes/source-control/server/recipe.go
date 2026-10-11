@@ -20,6 +20,7 @@ const (
 	ActionRepositoriesBranches      = "repositories.branches"
 	ActionChangeRequestsCreate      = "change_requests.create"
 	ActionChangeRequestsGet         = "change_requests.get"
+	ActionChangeRequestsSync        = "change_requests.sync"
 	ActionChangeRequestsLink        = "change_requests.link"
 	ActionChangeRequestsUnlink      = "change_requests.unlink"
 	ActionChangeRequestAssociations = "change_requests.associations"
@@ -184,6 +185,15 @@ type ReviewReader interface {
 	Associations(context.Context, string) ([]ReviewAssociation, error)
 }
 
+// TaskReviewSyncer is the optional per-task sync capability behind the
+// change_requests.sync action: drop the task's cached reads and re-run the
+// reviews refresh so the next reads hit the provider. Providers whose reads
+// are not cached may leave it unimplemented; the action then reports that
+// sync is unsupported instead of silently no-opping.
+type TaskReviewSyncer interface {
+	SyncTask(context.Context, string, string) ([]ReviewSummary, error)
+}
+
 // Extension implements optional plugin SDK surfaces. Embed or delegate to it
 // from the concrete value passed to pluginsdk.Serve.
 type Extension struct {
@@ -218,6 +228,8 @@ func (e *Extension) HandleAction(ctx context.Context, request *pluginsdk.PluginA
 		return e.createChangeRequest(ctx, request)
 	case ActionChangeRequestsGet:
 		return e.getReviews(ctx, request)
+	case ActionChangeRequestsSync:
+		return e.syncChangeRequests(ctx, request)
 	case ActionChangeRequestAssociations:
 		return e.getAssociations(ctx, request)
 	case ActionChangeRequestsLink:
@@ -262,6 +274,32 @@ func (e *Extension) getReviews(ctx context.Context, request *pluginsdk.PluginAct
 	if err != nil {
 		return nil, fmt.Errorf("source-control recipe: refresh task reviews: %w", err)
 	}
+	return e.respondReviews(reviews)
+}
+
+// syncChangeRequests is the manual, user-driven refresh: the provider drops
+// the task's cached reads and re-runs the reviews refresh, so a PR opened
+// seconds ago is discovered and linked now instead of at the next TTL
+// expiry. Background refreshes stay fully cache-absorbed — this action is
+// the one place freshness is paid for explicitly.
+func (e *Extension) syncChangeRequests(ctx context.Context, request *pluginsdk.PluginActionRequest) (*pluginsdk.PluginActionResponse, error) {
+	if strings.TrimSpace(request.Context.WorkspaceID) == "" || strings.TrimSpace(request.Context.TaskID) == "" || e.Reviews == nil {
+		return nil, errors.New("source-control recipe: review sync requires verified workspace and task context")
+	}
+	syncer, ok := e.Reviews.(TaskReviewSyncer)
+	if !ok {
+		return nil, fmt.Errorf("source-control recipe: provider %q does not support per-task sync", e.ProviderID)
+	}
+	reviews, err := syncer.SyncTask(ctx, request.Context.WorkspaceID, request.Context.TaskID)
+	if err != nil {
+		return nil, fmt.Errorf("source-control recipe: sync task reviews: %w", err)
+	}
+	return e.respondReviews(reviews)
+}
+
+// respondReviews stamps provider ids and validates identities for a
+// reviews-shaped action response.
+func (e *Extension) respondReviews(reviews []ReviewSummary) (*pluginsdk.PluginActionResponse, error) {
 	for i := range reviews {
 		identity := ChangeRequestIdentity{
 			ConnectionScope: reviews[i].ConnectionScope,
