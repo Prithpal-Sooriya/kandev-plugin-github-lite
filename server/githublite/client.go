@@ -87,6 +87,26 @@ func (c *client) getJSON(ctx context.Context, path string, out any) error {
 	return nil
 }
 
+// getJSONEmptyTTL is getJSON for list-shaped reads whose EMPTY answer
+// should expire early: an empty body is cached only emptyTTL so a freshness
+// sweep re-checks soon instead of masking a just-opened PR for the whole
+// default TTL window. Non-empty bodies cache normally.
+func (c *client) getJSONEmptyTTL(ctx context.Context, path string, out any, emptyTTL time.Duration) error {
+	body, err := c.cachedEmptyTTL(ctx, http.MethodGet, path, nil, emptyTTL)
+	if err != nil {
+		return err
+	}
+	if body == nil {
+		return nil // 404: leave out untouched
+	}
+	if out != nil {
+		if err := json.Unmarshal(body, out); err != nil {
+			return fmt.Errorf("github-lite: decoding %s: %w", path, err)
+		}
+	}
+	return nil
+}
+
 // postJSON performs an uncached POST (mutations are never cached) and
 // unmarshals the response into out.
 func (c *client) postJSON(ctx context.Context, path string, payload, out any) error {
@@ -112,12 +132,28 @@ func (c *client) postJSON(ctx context.Context, path string, payload, out any) er
 
 // cached serves a GET from the TTL cache when fresh, otherwise fetches once.
 func (c *client) cached(ctx context.Context, method, path string, body []byte) ([]byte, error) {
+	return c.cachedEmptyTTL(ctx, method, path, body, 0)
+}
+
+// cachedEmptyTTL is cached with one refinement: an EMPTY response body (a
+// "[]" or "null" from a list endpoint) expires after emptyTTL instead of the
+// client TTL. Negative answers are worth little cache time — the caller is
+// a freshness sweep that asks again shortly, and a long-lived empty entry
+// would mask a just-opened PR for the whole default TTL window. Positive
+// answers cache like everything else. emptyTTL <= 0 disables the refinement.
+func (c *client) cachedEmptyTTL(ctx context.Context, method, path string, body []byte, emptyTTL time.Duration) ([]byte, error) {
 	c.mu.Lock()
 	key := method + " " + path
 	entry, hit := c.cache[key]
 	c.mu.Unlock()
-	if hit && time.Since(entry.fetchURI) < c.ttl {
-		return entry.body, nil
+	if hit {
+		ttl := c.ttl
+		if emptyTTL > 0 && isEmptyJSONBody(entry.body) {
+			ttl = emptyTTL
+		}
+		if time.Since(entry.fetchURI) < ttl {
+			return entry.body, nil
+		}
 	}
 	response, err := c.do(ctx, method, path, body)
 	if err != nil || response == nil {
@@ -127,6 +163,22 @@ func (c *client) cached(ctx context.Context, method, path string, body []byte) (
 	c.cache[key] = clientCacheEntry{body: response, fetchURI: time.Now()}
 	c.mu.Unlock()
 	return response, nil
+}
+
+// isEmptyJSONBody reports whether a JSON response body carries no data
+// (empty, "[]", or "null").
+func isEmptyJSONBody(body []byte) bool {
+	trimmed := bytes.TrimSpace(body)
+	switch {
+	case len(trimmed) == 0:
+		return true
+	case trimmed[0] == '[':
+		return len(bytes.TrimSpace(trimmed[1:len(trimmed)-1])) == 0
+	case trimmed[0] == 'n':
+		return bytes.Equal(trimmed, []byte("null"))
+	default:
+		return false
+	}
 }
 
 // do performs one request with one rate-limit-aware retry. It returns a nil

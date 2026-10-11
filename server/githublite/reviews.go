@@ -14,6 +14,14 @@ import (
 	recipe "kandev-plugin-github-lite/recipes/source-control/server"
 )
 
+// autoAttachEmptyTTL is how long an EMPTY auto-attach branch lookup
+// ("no open PR on this branch yet") stays cached. It is deliberately under
+// the UI freshness sweep's 60s cadence so every sweep re-checks a branch
+// that still has no PR — a PR the agent opens is picked up within one sweep
+// instead of one default TTL (5 minutes). Bounded cost: one call per sweep
+// per actively watched PR-less task; non-empty answers cache normally.
+const autoAttachEmptyTTL = 45 * time.Second
+
 // prStatus bundles everything one PR read fetches. The PR payload itself is
 // cached; the reviews/checks/comments fetches are separate cache entries, so
 // a task with two linked PRs visible for ten minutes costs a fixed handful of
@@ -407,7 +415,13 @@ func (a *Adapters) ForTask(ctx context.Context, workspaceID, taskID string) ([]r
 func (a *Adapters) attachOpenHeadPRs(ctx context.Context, workspaceID, taskID, owner, name, branch string, document associationDocument, seen map[string]bool, summaries *[]recipe.ReviewSummary) {
 	var pulls []apiPullRequest
 	path := fmt.Sprintf("/repos/%s/%s/pulls?head=%s:%s&state=open&per_page=10", owner, name, owner, branch)
-	if err := a.client.getJSON(ctx, path, &pulls); err != nil {
+	// An EMPTY answer is cached only briefly (autoAttachEmptyTTL, well under
+	// the UI freshness sweep's 60s cadence) so a PR the agent opens is picked
+	// up on the next sweep instead of being masked by a long-lived negative
+	// cache entry; a non-empty answer caches like everything else. The cost
+	// is bounded: one re-check per sweep per actively watched task, only
+	// while the branch still has no open PR.
+	if err := a.client.getJSONEmptyTTL(ctx, path, &pulls, autoAttachEmptyTTL); err != nil {
 		return
 	}
 	for _, pull := range pulls {

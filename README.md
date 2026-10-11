@@ -32,7 +32,13 @@ https://github.com/user-attachments/assets/0376dc35-9047-4961-bfc7-5a074b3e2893
   refresh — the same durable link a manual link writes, discovered with the
   same one TTL-cached `pulls?head=` lookup auto-attach already makes. Unlink
   tombstones the PR so a stale match never resurrects it; linking it again
-  clears the tombstone.
+  clears the tombstone. While you watch, a newly opened PR is picked up by
+  the next 60s sweep: the lookup's *empty* answer expires after 45s (well
+  under the sweep cadence) instead of the default 5-minute TTL, so a
+  long-lived negative cache entry never masks a PR the agent just opened —
+  at the bounded cost of one re-check per sweep per watched task that still
+  has no open PR on its branch. (Positive answers — PR found — keep the
+  normal TTL, and bursts are deduped either way.)
 - **Stays fresh while you watch.** A surface left open (task view, PR status
   strip) re-resolves every 60s while the window is visible, plus immediately
   on window focus, so a PR merged on GitHub shows up as merged instead of

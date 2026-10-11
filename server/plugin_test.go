@@ -192,6 +192,19 @@ func (f *fakeGitHub) record(path string) {
 	f.mu.Unlock()
 }
 
+// countRequests reports how many recorded requests match path as a substring.
+func (f *fakeGitHub) countRequests(path string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, request := range f.requests {
+		if strings.Contains(request, path) {
+			n++
+		}
+	}
+	return n
+}
+
 func (f *fakeGitHub) handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.record(r.Method + " " + r.URL.Path + "?" + r.URL.RawQuery)
@@ -515,6 +528,42 @@ func TestAutoAttachMatchesCheckoutBranch(t *testing.T) {
 	reviews, err = adapters.ForTask(ctx, "workspace-1", "task-9")
 	require.NoError(t, err)
 	require.Len(t, reviews, 1)
+}
+
+func TestAutoAttachNegativeLookupDedupesBursts(t *testing.T) {
+	github := newFakeGitHub(t)
+	host := newFakeHost(nil)
+	branch := "main"
+	host.repos = []pluginsdk.Repository{{
+		ID: "row-1", WorkspaceID: "workspace-1", Name: "widgets",
+		ProviderID: "github", ProviderHost: "github.com", OwnerOrProject: "acme",
+		RemoteURL: "https://github.com/acme/widgets.git", DefaultBranch: &branch,
+	}}
+	host.tasks["task-9"] = &pluginsdk.Task{
+		ID: "task-9", WorkspaceID: "workspace-1",
+		Repositories: []pluginsdk.TaskRepository{{RepositoryID: "row-1", CheckoutBranch: "feature/auto"}},
+	}
+	adapters := newTestAdapters(t, github, host)
+	ctx := githublite.WithWorkspaceID(context.Background(), "workspace-1")
+	lookup := "/repos/acme/widgets/pulls?head=acme:feature/auto"
+
+	// No PR yet: the first refresh pays one lookup and finds nothing.
+	reviews, err := adapters.ForTask(ctx, "workspace-1", "task-9")
+	require.NoError(t, err)
+	require.Empty(t, reviews)
+	require.Equal(t, 1, github.countRequests(lookup), "one lookup for a PR-less branch")
+
+	// The agent opens the PR. An immediate second refresh is a burst (a
+	// remount landing inside the freshness sweep window): it still serves
+	// the fresh negative answer — cadence must not multiply quota. The PR
+	// is picked up by the NEXT sweep instead: the negative entry expires
+	// after autoAttachEmptyTTL (45s, under the sweep's 60s cadence) — pinned
+	// by TestCachedEmptyTTLSemantics in the githublite package.
+	github.addPull("acme", "widgets", 7, "feature/auto", "main")
+	reviews, err = adapters.ForTask(ctx, "workspace-1", "task-9")
+	require.NoError(t, err)
+	require.Empty(t, reviews, "fresh negative answer masks the PR until the entry lapses")
+	require.Equal(t, 1, github.countRequests(lookup), "burst must be deduped")
 }
 
 func TestRateLimitRetriesOnce(t *testing.T) {
