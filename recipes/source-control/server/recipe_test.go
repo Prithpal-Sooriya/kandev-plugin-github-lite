@@ -88,6 +88,29 @@ type reviewReaderStub struct {
 	gotTask      string
 	reviews      []ReviewSummary
 	associations []ReviewAssociation
+	synced       bool
+}
+
+func (s *reviewReaderStub) SyncTask(_ context.Context, workspaceID, taskID string) ([]ReviewSummary, error) {
+	s.gotWorkspace = workspaceID
+	s.gotTask = taskID
+	s.synced = true
+	return s.reviews, nil
+}
+
+// synclessReviewReader implements ReviewReader without the optional
+// TaskReviewSyncer capability: the sync action must reject it instead of
+// silently degrading to a plain refresh.
+type synclessReviewReader struct {
+	reviews []ReviewSummary
+}
+
+func (s *synclessReviewReader) ForTask(_ context.Context, _, _ string) ([]ReviewSummary, error) {
+	return s.reviews, nil
+}
+
+func (s *synclessReviewReader) Associations(_ context.Context, _ string) ([]ReviewAssociation, error) {
+	return nil, nil
 }
 
 func (s *reviewReaderStub) ForTask(_ context.Context, workspaceID, taskID string) ([]ReviewSummary, error) {
@@ -604,6 +627,58 @@ func TestReviewRefreshUsesVerifiedTaskAndReturnsSemanticStatus(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(response.Body, &body))
 	require.Equal(t, reviews, body.Reviews)
+}
+
+func TestReviewSyncUsesVerifiedTaskAndReturnsSemanticStatus(t *testing.T) {
+	reviews := []ReviewSummary{{
+		ProviderID:          "acme",
+		ReviewKey:           "tools/widgets#42",
+		Title:               "Provider-neutral hooks",
+		URL:                 "https://code.example/tools/widgets/changes/42",
+		ConnectionScope:     "connection-7",
+		RepositoryID:        "immutable-repository-9",
+		ChangeRequestNumber: 42,
+		State:               "open",
+		TaskStatus: &ReviewTaskStatus{
+			Number:        42,
+			State:         "open",
+			PipelineState: "success",
+		},
+	}}
+	reader := &reviewReaderStub{reviews: reviews}
+	extension := &Extension{ProviderID: "acme", Reviews: reader}
+
+	response, err := extension.HandleAction(context.Background(), &pluginsdk.PluginActionRequest{
+		ActionKey: ActionChangeRequestsSync,
+		Context: pluginsdk.VerifiedActionContext{
+			WorkspaceID: "workspace-1",
+			TaskID:      "task-1",
+		},
+	})
+	require.NoError(t, err)
+	require.True(t, reader.synced, "sync action must reach the syncer")
+	require.Equal(t, "workspace-1", reader.gotWorkspace)
+	require.Equal(t, "task-1", reader.gotTask)
+	var body struct {
+		Reviews []ReviewSummary `json:"reviews"`
+	}
+	require.NoError(t, json.Unmarshal(response.Body, &body))
+	require.Equal(t, reviews, body.Reviews)
+	require.Equal(t, "acme", body.Reviews[0].ProviderID)
+}
+
+func TestReviewSyncRejectsProviderWithoutSyncCapability(t *testing.T) {
+	extension := &Extension{ProviderID: "acme", Reviews: &synclessReviewReader{}}
+
+	_, err := extension.HandleAction(context.Background(), &pluginsdk.PluginActionRequest{
+		ActionKey: ActionChangeRequestsSync,
+		Context: pluginsdk.VerifiedActionContext{
+			WorkspaceID: "workspace-1",
+			TaskID:      "task-1",
+		},
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "does not support per-task sync")
 }
 
 func TestAssociationRefreshReturnsCompleteImmutableIdentities(t *testing.T) {

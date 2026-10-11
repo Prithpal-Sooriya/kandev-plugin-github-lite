@@ -4,6 +4,30 @@ All notable changes to this plugin are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com); versions match
 `manifest.yaml` (and the `Makefile`).
 
+## [0.1.8] — 2026-02-04
+
+### Added
+
+- **Manual "Sync GitHub pull requests" task action** — freshness is now
+  user-driven instead of timer-driven. The task's link menu carries a **Sync
+  GitHub pull requests** action: it drops **that task's** cached GitHub
+  reads (its checkout-branch `pulls?head=` lookup + its linked PRs' detail
+  reads) and re-runs the reviews refresh, so a PR the agent opened seconds
+  ago is discovered and auto-linked immediately instead of at the next TTL
+  expiry. Forgetting is scoped to the task's repositories — other tickets'
+  cache entries survive — and one press costs roughly one branch lookup
+  plus a handful of detail reads per linked PR.
+
+### Changed
+
+- **Reverted 0.1.7's short negative-TTL** (empty branch-lookup answers
+  expiring in 45s): it made each 60s sweep re-check every actively watched
+  task that had no PR yet, which is a standing cost on a timer — a mild
+  drift from the plugin's ethos that cadence should never multiply quota.
+  All answers (empty or not) again cache for the full TTL, so background
+  refreshes are fully cache-absorbed; explicit freshness is bought with the
+  manual sync action above.
+
 ## [0.1.7] — 2026-02-04
 
 ### Fixed

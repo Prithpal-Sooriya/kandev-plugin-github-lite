@@ -530,7 +530,7 @@ func TestAutoAttachMatchesCheckoutBranch(t *testing.T) {
 	require.Len(t, reviews, 1)
 }
 
-func TestAutoAttachNegativeLookupDedupesBursts(t *testing.T) {
+func TestSyncTaskDiscoversNewlyOpenedPR(t *testing.T) {
 	github := newFakeGitHub(t)
 	host := newFakeHost(nil)
 	branch := "main"
@@ -547,23 +547,44 @@ func TestAutoAttachNegativeLookupDedupesBursts(t *testing.T) {
 	ctx := githublite.WithWorkspaceID(context.Background(), "workspace-1")
 	lookup := "/repos/acme/widgets/pulls?head=acme:feature/auto"
 
-	// No PR yet: the first refresh pays one lookup and finds nothing.
+	// No PR yet: the first refresh pays one lookup, finds nothing, and the
+	// empty answer is TTL-cached like everything else.
 	reviews, err := adapters.ForTask(ctx, "workspace-1", "task-9")
 	require.NoError(t, err)
 	require.Empty(t, reviews)
 	require.Equal(t, 1, github.countRequests(lookup), "one lookup for a PR-less branch")
 
-	// The agent opens the PR. An immediate second refresh is a burst (a
-	// remount landing inside the freshness sweep window): it still serves
-	// the fresh negative answer — cadence must not multiply quota. The PR
-	// is picked up by the NEXT sweep instead: the negative entry expires
-	// after autoAttachEmptyTTL (45s, under the sweep's 60s cadence) — pinned
-	// by TestCachedEmptyTTLSemantics in the githublite package.
+	// The agent opens the PR. A background refresh right after still serves
+	// the cached negative answer: background cadence never multiplies
+	// GitHub quota — freshness is NOT timer-driven.
 	github.addPull("acme", "widgets", 7, "feature/auto", "main")
 	reviews, err = adapters.ForTask(ctx, "workspace-1", "task-9")
 	require.NoError(t, err)
-	require.Empty(t, reviews, "fresh negative answer masks the PR until the entry lapses")
-	require.Equal(t, 1, github.countRequests(lookup), "burst must be deduped")
+	require.Empty(t, reviews, "cached negative answer masks the PR until sync")
+	require.Equal(t, 1, github.countRequests(lookup), "background refresh must stay cache-served")
+
+	// The manual sync is the user-driven escape hatch: it forgets this
+	// task's repository reads, re-runs the refresh, and discovers (and
+	// auto-links) the PR the agent opened seconds ago.
+	reviews, err = adapters.SyncTask(ctx, "workspace-1", "task-9")
+	require.NoError(t, err)
+	require.Len(t, reviews, 1, "sync must discover the newly opened PR")
+	require.Equal(t, int64(7), reviews[0].ChangeRequestNumber)
+	require.Equal(t, "testuser", reviews[0].ConnectionScope)
+	require.GreaterOrEqual(t, github.countRequests(lookup), 2, "sync must re-fetch the branch lookup")
+
+	value, found, err := host.GetState(ctx, "workspace", "workspace-1", "github_lite_task_associations:task-9")
+	require.NoError(t, err)
+	require.True(t, found, "sync must persist the discovered association")
+	_ = value
+
+	// The next background refresh is served from the stored association —
+	// the sync's persisted link sticks without further GitHub calls.
+	base := github.countRequests(lookup)
+	reviews, err = adapters.ForTask(ctx, "workspace-1", "task-9")
+	require.NoError(t, err)
+	require.Len(t, reviews, 1, "stored association survives the sync")
+	require.Equal(t, base, github.countRequests(lookup), "post-sync refresh stays cache-served")
 }
 
 func TestRateLimitRetriesOnce(t *testing.T) {

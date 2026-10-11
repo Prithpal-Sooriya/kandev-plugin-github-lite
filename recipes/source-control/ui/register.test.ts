@@ -14,6 +14,7 @@ type ActionResponder = (key: string, input?: unknown, options?: unknown) => unkn
 function harness(actionResult: unknown | ActionResponder) {
   let repositoryProvider: RepositoryProviderRegistration | undefined;
   let taskAction: TaskAction | undefined;
+  const taskActions: TaskAction[] = [];
   let taskLinkDialog: TaskLinkDialog | undefined;
   const taskLinkClose = vi.fn();
   let reviewProvider: ReviewProvider | undefined;
@@ -23,6 +24,7 @@ function harness(actionResult: unknown | ActionResponder) {
     }),
     registerTaskAction: vi.fn((action: TaskAction) => {
       taskAction = action;
+      taskActions.push(action);
     }),
     registerReviewProvider: vi.fn((provider: ReviewProvider) => {
       reviewProvider = provider;
@@ -58,6 +60,7 @@ function harness(actionResult: unknown | ActionResponder) {
     lifecycle,
     get repositoryProvider() { return repositoryProvider; },
     get taskAction() { return taskAction; },
+    get taskActions() { return taskActions; },
     get taskLinkDialog() { return taskLinkDialog; },
     taskLinkClose,
     get reviewProvider() { return reviewProvider; },
@@ -275,6 +278,40 @@ describe("registerSourceControlRecipe", () => {
       linked: false,
       associationError: "Created remotely; link it again after reconnecting.",
     });
+  });
+
+  it("registers a host-owned Sync action that re-reads the task on demand", async () => {
+    const test = harness(undefined);
+    const sync = test.taskActions.find((action) => action.id === "acme-sync-change-requests");
+    expect(sync).toBeDefined();
+    expect(sync!.label).toBe("Sync Acme change requests");
+    expect(sync!.placement).toBe("link");
+    expect(sync!.singleTaskOnly).toBe(true);
+
+    await sync!.run({
+      workspaceId: "workspace-1",
+      taskId: "task-2",
+      repositories: [],
+      pathname: "/tasks/task-2",
+      presentation: "desktop",
+    });
+
+    // One sync press: the server drops the task's cached reads, then the
+    // panel + workspace refreshes follow on the fresh cache.
+    const syncCalls = test.invokeAction.mock.calls.filter((call) => call[0] === "change_requests.sync");
+    expect(syncCalls).toEqual([
+      ["change_requests.sync", { workspaceId: "workspace-1", taskId: "task-2" }],
+    ]);
+    expect(test.invokeAction).toHaveBeenCalledWith(
+      "change_requests.get",
+      expect.objectContaining({ workspaceId: "workspace-1", taskId: "task-2" }),
+      expect.anything(),
+    );
+    expect(test.invokeAction).toHaveBeenCalledWith(
+      "change_requests.associations",
+      expect.objectContaining({ workspaceId: "workspace-1" }),
+      expect.anything(),
+    );
   });
 
   it("registers a host-owned Link action and forwards cancellation to the link action", async () => {

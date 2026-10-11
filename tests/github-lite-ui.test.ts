@@ -54,8 +54,13 @@ describe("ui/register bundle entry", () => {
 
     expect(repositoryProviders).toHaveLength(1);
     expect(repositoryProviders[0]!.id).toBe("github-lite");
-    expect(taskActions).toHaveLength(1);
-    expect(taskActions[0]!.id).toBe("github-lite-link-change-request");
+    expect(taskActions).toHaveLength(2);
+    expect(taskActions.map((a) => a.id)).toEqual([
+      "github-lite-sync-change-requests",
+      "github-lite-link-change-request",
+    ]);
+    expect(taskActions[1]!.placement).toBe("link");
+    expect(taskActions[1]!.singleTaskOnly).toBe(true);
     expect(reviewProviders).toHaveLength(1);
     expect(reviewProviders[0]!.id).toBe("github-lite");
     expect(reviewProviders[0]!.changeRequestNoun).toBe("pull request");
