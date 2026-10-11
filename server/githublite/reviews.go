@@ -464,7 +464,10 @@ func (a *Adapters) discoverUnlinkedAuthorPRs(ctx context.Context, host pluginsdk
 			continue
 		}
 		var pulls []apiPullRequest
-		path := fmt.Sprintf("/repos/%s/%s/pulls?state=open&sort=created&direction=desc&per_page=20", owner, name)
+		// per_page=50 keeps the newest-created window wide enough for busy
+		// upstream repos (where the 50 newest open PRs span several days), all
+		// within the same single call.
+		path := fmt.Sprintf("/repos/%s/%s/pulls?state=open&sort=created&direction=desc&per_page=50", owner, name)
 		if err := a.client.getJSON(ctx, path, &pulls); err != nil {
 			continue
 		}
