@@ -492,7 +492,7 @@ func (a *Adapters) discoverUnlinkedAuthorPRs(ctx context.Context, host pluginsdk
 			identity := recipe.ChangeRequestIdentity{
 				ConnectionScope: scope,
 				RepositoryID:    repositoryID,
-				Number:         pull.Number,
+				Number:          pull.Number,
 			}
 			if err := a.Link(ctx, taskID, identity); err != nil {
 				logger.Warn("sync-link persist failed", "workspace", workspaceID, "task_id", taskID, "pr_number", pull.Number, "error", err.Error())
@@ -592,7 +592,7 @@ func (a *Adapters) attachOpenHeadPRs(ctx context.Context, workspaceID, taskID, o
 		identity := recipe.ChangeRequestIdentity{
 			ConnectionScope: a.scopeCached(),
 			RepositoryID:    repositoryID,
-			Number:         pull.Number,
+			Number:          pull.Number,
 		}
 		if err := a.Link(ctx, taskID, identity); err != nil {
 			logger.Warn("auto-link persist failed", "workspace", workspaceID, "task_id", taskID, "pr_number", pull.Number, "error", err.Error())

@@ -32,6 +32,11 @@ type Config struct {
 	CacheTTL     int64
 	AutoAttach   bool
 	MaxListPages int64
+	// AutoFixEnabled gates the auto-fix loop surface (default true). The
+	// loop itself stays user-triggered either way; this only hides it.
+	AutoFixEnabled bool
+	// AutoFixMaxRounds caps one auto-fix press's rounds (default 3).
+	AutoFixMaxRounds int64
 }
 
 func configFromHost(host pluginsdk.Host) (Config, error) {
@@ -39,7 +44,7 @@ func configFromHost(host pluginsdk.Host) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("github-lite: reading config: %w", err)
 	}
-	config := Config{AutoAttach: true, CacheTTL: 300, MaxListPages: 3}
+	config := Config{AutoAttach: true, CacheTTL: 300, MaxListPages: 3, AutoFixEnabled: true, AutoFixMaxRounds: 3}
 	if value, ok := raw["github_token"].(string); ok {
 		config.Token = value
 	}
@@ -54,6 +59,12 @@ func configFromHost(host pluginsdk.Host) (Config, error) {
 	}
 	if value, ok := toInt(raw["max_list_pages"]); ok && value > 0 {
 		config.MaxListPages = value
+	}
+	if value, ok := raw["auto_fix_enabled"].(bool); ok {
+		config.AutoFixEnabled = value
+	}
+	if value, ok := toInt(raw["auto_fix_max_rounds"]); ok && value > 0 {
+		config.AutoFixMaxRounds = value
 	}
 	return config, nil
 }
@@ -89,11 +100,18 @@ type Adapters struct {
 
 	scopeMu sync.Mutex
 	scope   string // connection scope: token owner's login, cached per process
+
+	// autoFixLoops is the in-process registry of live auto-fix loops,
+	// keyed by "taskID:repositoryID:number". Entries exist only between a
+	// Start press and the loop's terminal state; persisted status lives in
+	// Host state (see autofix.go).
+	autoFixMu    sync.Mutex
+	autoFixLoops map[string]*autoFixLoop
 }
 
 // NewAdapters returns adapters that resolve the Host lazily on first use.
 func NewAdapters(host func() pluginsdk.Host) *Adapters {
-	return &Adapters{host: host}
+	return &Adapters{host: host, autoFixLoops: make(map[string]*autoFixLoop)}
 }
 
 // SetBaseURLOverride points the GitHub client at a different base URL.

@@ -4,6 +4,61 @@ All notable changes to this plugin are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com); versions match
 `manifest.yaml` (and the `Makefile`).
 
+## [0.2.0] — Auto-fix CI button ("@ci-auto-fix" loop)
+
+The built-in GitHub integration ships a magic "@ci-auto-fix" prompt that
+turns a session loose on one PR until CI is green, conflicts are resolved,
+and the user's PR comments are addressed. The core automation only runs for
+its own connections, so this plugin now provides the same loop as a
+**per-PR button** on the Reviews panel — with this plugin's rules: no
+pollers, no webhooks, bounded rounds, and every GitHub call paid only when
+the user presses the button.
+
+Press **Auto-fix CI** on a pull request and the plugin starts (or resumes)
+a bounded auto-fix loop for that PR in the background: each round it reads
+the PR snapshot (failing checks with URLs, mergeable state, *the token
+owner's* review-thread and issue comments — the loop is for *your*
+comments, not reviewer noise), dispatches a self-contained
+`@ci-auto-fix`-tagged prompt to the task's agent session through the host
+message API, and waits for the session to finish its turn before looking
+again. The loop stops on green CI with no new feedback ("done"), on the
+user pressing **Stop auto-fix**, on `max_rounds` (default 3), on a
+needs-input turn, or on a failed session — whichever comes first — and
+every round is checkpointed (HeadSHA + seen comment IDs + failing-check
+set) so a plugin restart or a second press resumes without re-reading
+what was already sent. "Pending" checks wait a bounded window and are
+never treated as failures; the agent is instructed never to merge the PR.
+Status is host-state only (zero GitHub calls), so the panel's 2s/15s
+status polls cost nothing; the loop survives the task conversation
+compaction and plugin restarts. A merged or closed PR and a fully green
+PR refuse to start.
+
+Why *plugin* `SendMessage` + self-contained prompts: the host only
+expands `@ci-auto-fix` mentions in web chat and its own built-in
+automation, not through plugin message dispatch — so the loop's prompt
+carries the full round instructions itself. The tag stays on the line so
+humans recognize the intent.
+
+### Added
+- `change_requests.auto_fix` + `change_requests.auto_fix_status` recipe
+  actions (task-scoped): start/stop with explicit `command`, and a
+  zero-provider-traffic status read the UI polls while mounted.
+- `AutoFix` capability on the recipe `Extension`
+  (`ChangeRequestAutoFixer`); providers without it surface a clean
+  "does not support auto-fix" error.
+- Per-PR header action with a live status line ("Auto-fix CI" ↔
+  "Stop auto-fix"; running/done/stopped/needs-input/error/idle states).
+- Config: `auto_fix_enabled` (default on) and `auto_fix_max_rounds`
+  (default 3). Disabling hides the button entirely.
+- New capabilities: `api_read` extended with `tasks` (the loop attaches to
+  the verified task context), plus `sessions`/`messages` reads and a
+  `messages` write (one host message per dispatched round).
+
+### Security
+- Bumped transitive dev dependencies past known advisories (`vite`
+  pinned to 8.3.4 via overrides, `source-map-js` 1.2.2) so the release
+  audit gate (`npm audit --audit-level=high`) passes clean.
+
 ## [0.1.9] — Sync discovery for branch-switched tasks
 
 The host records a task's checkout branch only at task creation. When an

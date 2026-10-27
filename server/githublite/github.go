@@ -27,24 +27,29 @@ type apiLabel struct {
 }
 
 type apiPullRequest struct {
-	Number             int64      `json:"number"`
-	State              string     `json:"state"` // "open" | "closed"
-	Title              string     `json:"title"`
-	HTMLURL            string     `json:"html_url"`
-	User               apiUser    `json:"user"`
-	Body               string     `json:"body"`
-	Draft              bool       `json:"draft"`
-	Merged             bool       `json:"merged"`
-	Head               apiBranch  `json:"head"`
-	Base               apiBranch  `json:"base"`
-	MergedAt           *time.Time `json:"merged_at"`
-	ClosedAt           *time.Time `json:"closed_at"`
-	CreatedAt          *time.Time `json:"created_at"`
-	UpdatedAt          *time.Time `json:"updated_at"`
-	Mergeable          bool       `json:"mergeable"`
-	Additions          int        `json:"additions"`
-	Deletions          int        `json:"deletions"`
-	RequestedReviewers []apiUser  `json:"requested_reviewers"`
+	Number    int64      `json:"number"`
+	State     string     `json:"state"` // "open" | "closed"
+	Title     string     `json:"title"`
+	HTMLURL   string     `json:"html_url"`
+	User      apiUser    `json:"user"`
+	Body      string     `json:"body"`
+	Draft     bool       `json:"draft"`
+	Merged    bool       `json:"merged"`
+	Head      apiBranch  `json:"head"`
+	Base      apiBranch  `json:"base"`
+	MergedAt  *time.Time `json:"merged_at"`
+	ClosedAt  *time.Time `json:"closed_at"`
+	CreatedAt *time.Time `json:"created_at"`
+	UpdatedAt *time.Time `json:"updated_at"`
+	Mergeable bool       `json:"mergeable"`
+	// MergeableState is GitHub's coarse conflict verdict ("dirty" means the
+	// PR has real conflicts with its base). It lags Mergeable by a moment on
+	// freshly-pushed PRs, so auto-fix treats Mergeable as the fast signal and
+	// MergeableState as the authoritative one when both are present.
+	MergeableState     string    `json:"mergeable_state"`
+	Additions          int       `json:"additions"`
+	Deletions          int       `json:"deletions"`
+	RequestedReviewers []apiUser `json:"requested_reviewers"`
 }
 
 type apiBranch struct {
@@ -84,6 +89,24 @@ type apiIssueComment struct {
 	Body      string     `json:"body"`
 	HTMLURL   string     `json:"html_url"`
 	CreatedAt *time.Time `json:"created_at"`
+}
+
+// apiReviewComment is one review-thread (inline) comment from
+// GET /repos/{o}/{r}/pulls/{n}/comments. Line is the position on the
+// latest commit; OriginalLine survives later pushes. Thread state
+// (resolved) is GraphQL-only and deliberately not modeled — auto-fix
+// treats a comment as addressed by its own checkpoint of seen ids.
+type apiReviewComment struct {
+	ID           int64      `json:"id"`
+	InReplyToID  int64      `json:"in_reply_to_id"`
+	User         apiUser    `json:"user"`
+	Body         string     `json:"body"`
+	Path         string     `json:"path"`
+	Line         int        `json:"line"`
+	OriginalLine int        `json:"original_line"`
+	HTMLURL      string     `json:"html_url"`
+	CreatedAt    *time.Time `json:"created_at"`
+	UpdatedAt    *time.Time `json:"updated_at"`
 }
 
 type apiBranchRef struct {

@@ -19,7 +19,8 @@
     "vitest": "4.1.11"
   },
   "overrides": {
-    "nanoid": "5.1.16"
+    "nanoid": "5.1.16",
+    "vite": "8.3.4"
   },
-  "version": "0.1.9"
+  "version": "0.2.0"
 }

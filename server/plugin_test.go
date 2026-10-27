@@ -31,6 +31,18 @@ type fakeHost struct {
 	config map[string]any
 	tasks  map[string]*pluginsdk.Task
 	repos  []pluginsdk.Repository
+
+	// Auto-fix loop surface: the sessions the loop polls and the prompts the
+	// fake messenger delivers. onSend lets tests script state transitions.
+	sessions     []pluginsdk.Session
+	sentMessages []sentMessage
+	onSend       func(taskID, sessionID, text string)
+}
+
+type sentMessage struct {
+	TaskID    string
+	SessionID string
+	Text      string
 }
 
 func newFakeHost(config map[string]any) *fakeHost {
@@ -93,6 +105,98 @@ func (h *fakeHost) EmitEvent(context.Context, string, map[string]any) error { re
 
 func (h *fakeHost) Tasks() pluginsdk.TaskReader { return fakeTaskReader{host: h} }
 
+func (h *fakeHost) Sessions() pluginsdk.SessionReader { return fakeSessionReader{host: h} }
+
+type fakeSessionReader struct{ host *fakeHost }
+
+func (r fakeSessionReader) List(_ context.Context, filter pluginsdk.SessionFilter, page pluginsdk.Page) ([]pluginsdk.Session, *pluginsdk.PageInfo, error) {
+	r.host.mu.Lock()
+	defer r.host.mu.Unlock()
+	var out []pluginsdk.Session
+	for _, session := range r.host.sessions {
+		if len(filter.TaskIDs) > 0 && !containsString(filter.TaskIDs, session.TaskID) {
+			continue
+		}
+		out = append(out, session)
+	}
+	return out, &pluginsdk.PageInfo{}, nil
+}
+
+func (r fakeSessionReader) CodeStats(context.Context, pluginsdk.SessionFilter, pluginsdk.Page) ([]pluginsdk.SessionCodeStats, *pluginsdk.PageInfo, error) {
+	return nil, &pluginsdk.PageInfo{}, nil
+}
+
+func (h *fakeHost) Messages() pluginsdk.MessageReader { return fakeMessenger{host: h} }
+
+type fakeMessenger struct{ host *fakeHost }
+
+func (m fakeMessenger) List(context.Context, pluginsdk.MessageFilter, pluginsdk.Page) ([]pluginsdk.Message, *pluginsdk.PageInfo, error) {
+	return nil, &pluginsdk.PageInfo{}, nil
+}
+
+// Send records the prompt, creates the task's session on demand (RUNNING —
+// the delivery path starts or resumes a session), and hands control to the
+// test's onSend hook for scripted state transitions.
+func (m fakeMessenger) Send(_ context.Context, taskID, sessionID, text string) (*pluginsdk.MessageDispatch, error) {
+	m.host.mu.Lock()
+	if sessionID == "" {
+		for _, session := range m.host.sessions {
+			if session.TaskID == taskID {
+				sessionID = session.ID
+				break
+			}
+		}
+	}
+	if sessionID == "" {
+		sessionID = taskID + "-session"
+		m.host.sessions = append(m.host.sessions, pluginsdk.Session{
+			ID: sessionID, TaskID: taskID, State: "RUNNING", StartedAt: "2024-01-01T00:00:00Z",
+		})
+	} else {
+		for i := range m.host.sessions {
+			if m.host.sessions[i].ID == sessionID {
+				m.host.sessions[i].State = "RUNNING"
+			}
+		}
+	}
+	m.host.sentMessages = append(m.host.sentMessages, sentMessage{TaskID: taskID, SessionID: sessionID, Text: text})
+	hook := m.host.onSend
+	m.host.mu.Unlock()
+	if hook != nil {
+		hook(taskID, sessionID, text)
+	}
+	return &pluginsdk.MessageDispatch{SessionID: sessionID, Status: "sent"}, nil
+}
+
+func (h *fakeHost) setSessionState(sessionID, state string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for i := range h.sessions {
+		if h.sessions[i].ID == sessionID {
+			h.sessions[i].State = state
+		}
+	}
+}
+
+func (h *fakeHost) sentTexts() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	texts := make([]string, 0, len(h.sentMessages))
+	for _, message := range h.sentMessages {
+		texts = append(texts, message.Text)
+	}
+	return texts
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
+}
+
 type fakeTaskReader struct{ host *fakeHost }
 
 func (r fakeTaskReader) Get(_ context.Context, id string) (*pluginsdk.Task, error) {
@@ -153,7 +257,10 @@ type fakeGitHub struct {
 	pulls    map[string]map[string]any // "owner/repo#n" -> pull
 	reviews  map[string][]map[string]any
 	checks   map[string][]map[string]any
-	comments map[string][]map[string]any
+	comments map[string][]map[string]any // issue comments (issues/<n>/comments)
+	// reviewComments serves pulls/<n>/comments (review-thread comments with
+	// path/line) — separate from issue comments, which have no location.
+	reviewComments map[string][]map[string]any
 
 	requests    []string
 	limitedOnce bool
@@ -167,10 +274,11 @@ func newFakeGitHub(t *testing.T) *fakeGitHub {
 		repos: []map[string]any{
 			{"id": 5001, "name": "widgets", "full_name": "acme/widgets", "owner": map[string]any{"login": "acme"}, "clone_url": "https://github.com/acme/widgets.git", "default_branch": "main"},
 		},
-		pulls:    make(map[string]map[string]any),
-		reviews:  make(map[string][]map[string]any),
-		checks:   make(map[string][]map[string]any),
-		comments: make(map[string][]map[string]any),
+		pulls:          make(map[string]map[string]any),
+		reviews:        make(map[string][]map[string]any),
+		checks:         make(map[string][]map[string]any),
+		comments:       make(map[string][]map[string]any),
+		reviewComments: make(map[string][]map[string]any),
 	}
 }
 
@@ -201,8 +309,8 @@ func (f *fakeGitHub) addPullWithDetails(owner, repo string, number int, head, ba
 func (f *fakeGitHub) addRepository(owner, repo string, id int64) {
 	f.repos = append(f.repos, map[string]any{
 		"id": id, "name": repo, "full_name": owner + "/" + repo,
-		"owner": map[string]any{"login": owner},
-		"clone_url": fmt.Sprintf("https://github.com/%s/%s.git", owner, repo),
+		"owner":          map[string]any{"login": owner},
+		"clone_url":      fmt.Sprintf("https://github.com/%s/%s.git", owner, repo),
 		"default_branch": "main",
 	})
 }
@@ -211,6 +319,37 @@ func (f *fakeGitHub) record(path string) {
 	f.mu.Lock()
 	f.requests = append(f.requests, path)
 	f.mu.Unlock()
+}
+
+// setHeadSHA advances a pull's head commit — what the agent's push does.
+func (f *fakeGitHub) setHeadSHA(owner, repo string, number int, sha string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pulls[fmt.Sprintf("%s/%s#%d", owner, repo, number)]["head"].(map[string]any)["sha"] = sha
+}
+
+// setMergeableState flips a pull's mergeable_state ("dirty" = conflicts).
+func (f *fakeGitHub) setMergeableState(owner, repo string, number int, state string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pulls[fmt.Sprintf("%s/%s#%d", owner, repo, number)]["mergeable_state"] = state
+}
+
+// setClosed marks a pull closed and merged (the helpers lock).
+func (f *fakeGitHub) setClosed(owner, repo string, number int, merged bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	pull := f.pulls[fmt.Sprintf("%s/%s#%d", owner, repo, number)]
+	pull["state"] = "closed"
+	pull["merged"] = merged
+}
+
+// setChecks replaces a pull's check runs (the helpers lock; never wrap them
+// in another f.mu hold).
+func (f *fakeGitHub) setChecks(owner, repo string, number int, checks []map[string]any) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.checks[fmt.Sprintf("%s/%s#%d", owner, repo, number)] = checks
 }
 
 // countRequests reports how many recorded requests match path as a substring.
@@ -301,14 +440,15 @@ func (f *fakeGitHub) handler() http.Handler {
 				writeJSON(w, map[string]any{})
 			case strings.HasPrefix(parts[2], "pulls/") && strings.HasSuffix(parts[2], "/comments"):
 				number := strings.TrimSuffix(strings.TrimPrefix(parts[2], "pulls/"), "/comments")
-				writeJSON(w, f.comments[slug+"#"+number])
+				writeJSON(w, f.reviewComments[slug+"#"+number])
 			case strings.HasPrefix(parts[2], "pulls/") && !strings.Contains(strings.TrimPrefix(parts[2], "pulls/"), "/"):
 				number := strings.TrimPrefix(parts[2], "pulls/")
 				writeJSON(w, f.pulls[slug+"#"+number])
 			case strings.HasPrefix(parts[2], "commits/") && strings.HasSuffix(parts[2], "/check-runs"):
+				sha := strings.TrimSuffix(strings.TrimPrefix(parts[2], "commits/"), "/check-runs")
 				number := ""
 				for _, pull := range f.pulls {
-					if pull["head"].(map[string]any)["sha"] == "abc123" {
+					if pull["head"].(map[string]any)["sha"] == sha && strings.HasPrefix(fmt.Sprint(pull["html_url"]), "https://github.com/"+slug+"/pull/") {
 						number = fmt.Sprint(pull["number"])
 					}
 				}

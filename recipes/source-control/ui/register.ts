@@ -28,7 +28,66 @@ export type SourceControlRecipeOptions = {
   matchesURL?(url: string): boolean;
   parseReference(reference: string): string | null;
   toChangeRequestDetail(review: RecipeReviewSummary): unknown;
+  /** Optional per-change-request auto-fix loop (github-lite: a bounded
+   * press-triggered @ci-auto-fix-style loop). Omit when the provider has no
+   * auto-fix capability; the review panel then renders exactly as before. */
+  autoFix?: SourceControlAutoFixOptions;
 };
+
+/** The auto-fix surface the review provider adds to the change request
+ * detail panel: a header action (start/stop) plus a status notice that
+ * polls the plugin's zero-provider-traffic status action while mounted. */
+export type SourceControlAutoFixOptions = {
+  /** Start/stop action key. Defaults to "change_requests.auto_fix". */
+  actionKey?: string;
+  /** Status action key. Defaults to "change_requests.auto_fix_status". */
+  statusKey?: string;
+  /** Start button label. Defaults to "Auto-fix CI". */
+  label?: string;
+  /** Stop button label. Defaults to "Stop auto-fix". */
+  stopLabel?: string;
+};
+
+type AutoFixStatusResponse = {
+  auto_fix?: unknown;
+  found?: unknown;
+};
+
+/** Normalized auto-fix loop report (mirrors the server's AutoFixReport). */
+type AutoFixReport = {
+  running: boolean;
+  status: string;
+  rounds: number;
+  maxRounds: number;
+  message: string;
+  updatedAt: number;
+};
+
+function normalizeAutoFixReport(value: unknown): AutoFixReport | undefined {
+  const source = record(value);
+  const status = text(source.status);
+  if (!status) return undefined;
+  return {
+    running: source.running === true,
+    status,
+    rounds: nonNegativeInteger(source.rounds) ?? 0,
+    maxRounds: nonNegativeInteger(source.max_rounds) ?? 0,
+    message: text(source.message),
+    updatedAt: finiteNumber(source.updated_at) ?? 0,
+  };
+}
+
+function autoFixNoticeText(report: AutoFixReport): string {
+  if (report.message) return report.message;
+  if (report.running) {
+    const rounds =
+      report.maxRounds > 0
+        ? ` — round ${Math.max(report.rounds, 1)}/${report.maxRounds}`
+        : "";
+    return `Auto-fix running${rounds}`;
+  }
+  return `Auto-fix ${report.status.replaceAll("_", " ")}`;
+}
 
 export type SourceControlRecipeLifecycle = {
   destroy(): void;
@@ -547,11 +606,27 @@ export function registerSourceControlRecipe(
           candidate.repositoryId === props.repositoryId &&
           String(candidate.changeRequestNumber) === String(props.changeRequestNumber),
       );
-      return host.jsx(host.ui.ChangeRequestDetail, {
-        detail: review ? options.toChangeRequestDetail(review) : null,
+      const detail = review ? options.toChangeRequestDetail(review) : null;
+      if (!options.autoFix) {
+        return host.jsx(host.ui.ChangeRequestDetail, {
+          detail,
+          presentation: props.presentation,
+          loading: false,
+          error: null,
+        });
+      }
+      // The auto-fix surface is a hook-driven panel: a header action
+      // (start/stop) plus a status notice that polls the plugin's
+      // zero-provider-traffic status action while mounted. Freshness for
+      // the rest of the panel still flows through the host's refreshes.
+      return host.jsx(createAutoFixPanel(host, options.autoFix), {
+        detail,
         presentation: props.presentation,
-        loading: false,
-        error: null,
+        workspaceId: props.workspaceId,
+        taskId: props.taskId,
+        connectionScope: props.connectionScope,
+        repositoryId: props.repositoryId,
+        changeRequestNumber: props.changeRequestNumber,
       });
     },
   });
@@ -563,5 +638,128 @@ export function registerSourceControlRecipe(
       reviewStore.clear();
       associationStore.clear();
     },
+  };
+}
+
+type AutoFixPanelProps = {
+  detail: unknown;
+  presentation: "desktop" | "mobile";
+  workspaceId: string;
+  taskId: string;
+  connectionScope: string;
+  repositoryId: string;
+  changeRequestNumber: string | number;
+};
+
+/** Milliseconds between status polls. While a loop runs this is a host-only
+ * read (the plugin serves it from Host state — no provider traffic); while
+ * idle it is a slow heartbeat. */
+const AUTO_FIX_POLL_RUNNING_MS = 2000;
+const AUTO_FIX_POLL_IDLE_MS = 15000;
+
+function createAutoFixPanel(host: PluginHostApi, autoFix: SourceControlAutoFixOptions) {
+  const actionKey = autoFix.actionKey ?? "change_requests.auto_fix";
+  const statusKey = autoFix.statusKey ?? "change_requests.auto_fix_status";
+  const startLabel = autoFix.label ?? "Auto-fix CI";
+  const stopLabel = autoFix.stopLabel ?? "Stop auto-fix";
+  const { useState, useEffect, useCallback } = host.React;
+
+  return function AutoFixPanel(props: AutoFixPanelProps) {
+    const [report, setReport] = useState<AutoFixReport | undefined>(undefined);
+    const [busy, setBusy] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+
+    const body = {
+      connection_scope: props.connectionScope,
+      repository_id: props.repositoryId,
+      number:
+        typeof props.changeRequestNumber === "string" && /^\d+$/.test(props.changeRequestNumber)
+          ? Number(props.changeRequestNumber)
+          : props.changeRequestNumber,
+    };
+
+    useEffect(() => {
+      let cancelled = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const poll = async () => {
+        try {
+          const response = await host.api.invokeAction<AutoFixStatusResponse>(
+            statusKey,
+            { workspaceId: props.workspaceId, taskId: props.taskId, body },
+          );
+          if (cancelled) return;
+          const next = normalizeAutoFixReport(response.auto_fix);
+          setReport(next);
+          timer = setTimeout(poll, next?.running ? AUTO_FIX_POLL_RUNNING_MS : AUTO_FIX_POLL_IDLE_MS);
+        } catch {
+          if (cancelled) return;
+          timer = setTimeout(poll, AUTO_FIX_POLL_IDLE_MS);
+        }
+      };
+      void poll();
+      return () => {
+        cancelled = true;
+        if (timer !== undefined) clearTimeout(timer);
+      };
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [statusKey, props.workspaceId, props.taskId, props.connectionScope, props.repositoryId, props.changeRequestNumber]);
+
+    const onAction = useCallback(async (request: { actionId?: string }) => {
+      if (request?.actionId !== "auto_fix") return;
+      setBusy(true);
+      setError(null);
+      try {
+        const response = await host.api.invokeAction<AutoFixStatusResponse>(
+          actionKey,
+          {
+            workspaceId: props.workspaceId,
+            taskId: props.taskId,
+            body: { ...body, command: report?.running ? "stop" : "start" },
+          },
+        );
+        const next = normalizeAutoFixReport(response.auto_fix);
+        if (next) setReport(next);
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      } finally {
+        setBusy(false);
+      }
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [actionKey, props.workspaceId, props.taskId, props.connectionScope, props.repositoryId, props.changeRequestNumber, report?.running]);
+
+    const running = report?.running === true;
+    const unsupported = report?.status === "unsupported";
+    const actions = unsupported
+      ? undefined
+      : [
+          {
+            id: "auto_fix",
+            label: running ? stopLabel : startLabel,
+            pendingLabel: running ? "Stopping…" : "Starting…",
+            placement: "header",
+            tone: running ? "secondary" : "default",
+            disabled: report === undefined || busy,
+            busy,
+          },
+        ];
+
+    const noticeText = error ?? (report ? autoFixNoticeText(report) : null);
+    const notice =
+      unsupported || noticeText === null
+        ? undefined
+        : host.jsx(host.ui.Alert, {
+            children: host.jsx(host.ui.AlertDescription, { children: noticeText }),
+          });
+
+    return host.jsx(host.ui.ChangeRequestDetail, {
+      detail: props.detail,
+      presentation: props.presentation,
+      loading: false,
+      error: null,
+      actions,
+      busyActionId: busy ? "auto_fix" : null,
+      onAction,
+      notice,
+    });
   };
 }

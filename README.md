@@ -53,6 +53,23 @@ https://github.com/user-attachments/assets/0376dc35-9047-4961-bfc7-5a074b3e2893
   task in the workspace. Anything that heuristic grabs wrongly is unlinked
   once and stays unlinked (the tombstone wins); cost is one open-PRs listing
   per repository, paid only on an explicit press.
+- **Auto-fix CI button (the "@ci-auto-fix" loop).** The built-in
+  integration's "@ci-auto-fix" magic is connection-locked; this plugin ships
+  the same loop as a per-PR button on the Reviews panel, plugin-style:
+  press **Auto-fix CI** and a bounded background loop runs the task's agent
+  on that PR until CI is green, merge conflicts are resolved, and *your*
+  (token-owner) review-thread and issue comments are addressed — reading
+  only what each round needs (failing checks with URLs, mergeable state,
+  your comments), dispatching one self-contained `@ci-auto-fix` prompt per
+  round, then waiting for the session's turn before looking again. It
+  stops on green with no new feedback, your stop press, the round cap
+  (default 3), a needs-input turn, or a failed session — never mid-turn —
+  and checkpoints each round (head SHA + seen comments + failing-check
+  set) so a restart or re-press resumes instead of re-reading. Pending
+  checks are waited out, never counted as failures, and the agent is told
+  never to merge the PR. All GitHub traffic is paid at press time; the
+  button's status line is host-state only. Merged/closed PRs and fully
+  green PRs refuse to start.
 - **Stays fresh while you watch.** A surface left open (task view, PR status
   strip) re-resolves every 60s while the window is visible, plus immediately
   on window focus, so a PR merged on GitHub shows up as merged instead of
@@ -78,6 +95,7 @@ https://github.com/user-attachments/assets/0376dc35-9047-4961-bfc7-5a074b3e2893
 | No GitHub search API | Search API has a 30 req/min limit regardless of token — never touched |
 | Single bounded rate-limit retry (≤10s) | 403/429 answers wait once, briefly, then surface as errors |
 | Capped pagination (default 3 pages) | Repository listing can't spiral |
+| Auto-fix loop: press-paid, round-bounded | Only the button press spends GitHub calls; max 3 rounds (config), status reads are host-state |
 | Provider id `github-lite` | Coexists with the built-in GitHub integration; takes over URLs only when the core one is unauthenticated |
 
 ## Setup
@@ -119,6 +137,9 @@ configure at **Settings → Plugins → GitHub Lite**:
 - **Auto-attach by branch** (default on) — open PRs matching a task's
   checkout branch appear on the task without linking.
 - **Max list pages** (default `3`) — pagination cap for repository listing.
+- **Auto-fix enabled** (default on) — the per-PR **Auto-fix CI** button and
+  its bounded loop. Disable to hide the button everywhere.
+- **Auto-fix max rounds** (default `3`) — round cap for one auto-fix press.
 
 The plugin requires kandev `0.97.0` or newer (`min_kandev_version` in
 `manifest.yaml`).
@@ -137,8 +158,9 @@ make package-host  # host-platform tarball in .build/
 ```
 
 - `server/githublite/` — the plugin backend: REST client with TTL cache
-  (`client.go`), repository/change-request/review/reference adapters, and
-  association storage (Host state, keyed per task, immutable identity =
+  (`client.go`), repository/change-request/review/reference adapters, association
+  storage, and the bounded auto-fix loop (`autofix.go`: round engine,
+  checkpoints, no-progress guard, turn-wait) (Host state, keyed per task, immutable identity =
   GitHub's numeric repository ID so renames can't break links).
 - `recipes/source-control/` — the source-control recipe, vendored and owned
   here (recipes are copy-and-own by design). One deliberate extension: server
@@ -149,7 +171,8 @@ make package-host  # host-platform tarball in .build/
   `github-lite` provider, the link action, and the review provider; maps
   plugin detail documents into the host's `ChangeRequestDetailModel`.
 - `tests/` — vitest for the UI half; `server/plugin_test.go` runs the backend
-  against an httptest fake GitHub and a fake Host.
+  against an httptest fake GitHub and a fake Host; `server/autofix_test.go` runs the auto-fix loop against those
+  fakes with shrunk timing.
 
 ### Conventions worth keeping
 
@@ -157,7 +180,10 @@ make package-host  # host-platform tarball in .build/
   burn this plugin exists to avoid.
 - **Add features as pull-based refreshes**, not loops. The recipe contract
   forbids background pollers; the host asks, the plugin answers from cache or
-  one bounded burst.
+  one bounded burst. The auto-fix loop is the one sanctioned exception:
+  user-pressed, round-bounded, checkpointed, and it never polls GitHub on
+  its own — each round reads once, prompted by the previous round's turn
+  ending.
 - **Identity is the numeric repository ID** (`GET /repositories/{id}`),
   never `owner/name` — renames keep working.
 - **404s and rate-limit errors never unlink associations** — a missing PR is

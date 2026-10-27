@@ -452,16 +452,16 @@ func TestUnlinkUsesCompleteIdentityInsteadOfReviewKey(t *testing.T) {
 
 func TestInspectURLSerializesPullRequestDetail(t *testing.T) {
 	details := &repositoryDetailsStub{inspected: &Repository{
-		ProviderHost:   "github.com",
+		ProviderHost:    "github.com",
 		ConnectionScope: "connection-7",
 		RepositoryID:    "immutable-repository-9",
 		OwnerOrProject:  "acme",
 		Name:            "widgets",
 		CloneURL:        "https://github.com/acme/widgets.git",
-		DefaultBranch:  "main",
-		HeadBranch:     "feat/assets-prefetch",
-		BaseBranch:     "main",
-		PullRequest:    &PullRequestRef{Number: 42, Title: "PR 42"},
+		DefaultBranch:   "main",
+		HeadBranch:      "feat/assets-prefetch",
+		BaseBranch:      "main",
+		PullRequest:     &PullRequestRef{Number: 42, Title: "PR 42"},
 	}}
 	extension := &Extension{ProviderID: "acme", RepositoryDetails: details}
 
@@ -493,7 +493,7 @@ func TestInspectURLUsesVerifiedWorkspaceAndBindsProviderIdentity(t *testing.T) {
 		OwnerOrProject:  "tools",
 		Name:            "widgets",
 		CloneURL:        "https://code.example/tools/widgets.git",
-		DefaultBranch:  "main",
+		DefaultBranch:   "main",
 	}
 	details := &repositoryDetailsStub{inspected: inspected}
 	extension := &Extension{ProviderID: "acme", RepositoryDetails: details}
@@ -706,4 +706,213 @@ func TestAssociationRefreshReturnsCompleteImmutableIdentities(t *testing.T) {
 	require.Equal(t, associations[0].ConnectionScope, body.Associations[0].ConnectionScope)
 	require.Equal(t, associations[0].RepositoryID, body.Associations[0].RepositoryID)
 	require.Equal(t, associations[0].ChangeRequestNumber, body.Associations[0].ChangeRequestNumber)
+}
+
+// --- auto-fix action wiring ------------------------------------------------
+
+type autoFixStub struct {
+	startedIdentity  ChangeRequestIdentity
+	startedWorkspace string
+	startedTaskID    string
+	stoppedIdentity  ChangeRequestIdentity
+	stoppedWorkspace string
+	stoppedTaskID    string
+	statusIdentity   ChangeRequestIdentity
+	statusCalls      int
+	report           AutoFixReport
+	found            bool
+	startErr         error
+}
+
+func (s *autoFixStub) StartAutoFix(_ context.Context, workspaceID, taskID string, identity ChangeRequestIdentity) (AutoFixReport, error) {
+	s.startedWorkspace, s.startedTaskID, s.startedIdentity = workspaceID, taskID, identity
+	if s.startErr != nil {
+		return AutoFixReport{}, s.startErr
+	}
+	return s.report, nil
+}
+
+func (s *autoFixStub) StopAutoFix(_ context.Context, workspaceID, taskID string, identity ChangeRequestIdentity) (AutoFixReport, error) {
+	s.stoppedWorkspace, s.stoppedTaskID, s.stoppedIdentity = workspaceID, taskID, identity
+	return s.report, nil
+}
+
+func (s *autoFixStub) AutoFixStatus(_ context.Context, workspaceID, taskID string, identity ChangeRequestIdentity) (AutoFixReport, bool, error) {
+	s.statusCalls++
+	s.statusIdentity = identity
+	return s.report, s.found, nil
+}
+
+func autoFixExtension(autoFix ChangeRequestAutoFixer) *Extension {
+	return &Extension{ProviderID: "acme", AutoFix: autoFix}
+}
+
+func autoFixBody(command string) []byte {
+	body := `{
+		"connection_scope":"connection-7",
+		"repository_id":"immutable-repository-9",
+		"number":42
+	}`
+	if command != "" {
+		body = `{
+			"command":"` + command + `",
+			"connection_scope":"connection-7",
+			"repository_id":"immutable-repository-9",
+			"number":42
+		}`
+	}
+	return []byte(body)
+}
+
+func TestAutoFixStartDelegatesWithVerifiedTaskContext(t *testing.T) {
+	stub := &autoFixStub{report: AutoFixReport{Running: true, Status: "running", Rounds: 1, MaxRounds: 3}}
+	extension := autoFixExtension(stub)
+
+	response, err := extension.HandleAction(context.Background(), &pluginsdk.PluginActionRequest{
+		ActionKey: ActionChangeRequestsAutoFix,
+		Context:   pluginsdk.VerifiedActionContext{WorkspaceID: "workspace-1", TaskID: "task-1"},
+		Body:      autoFixBody("start"),
+	})
+	require.NoError(t, err)
+
+	var payload struct {
+		AutoFix AutoFixReport `json:"auto_fix"`
+	}
+	require.NoError(t, json.Unmarshal(response.Body, &payload))
+	require.Equal(t, "running", payload.AutoFix.Status)
+	require.Equal(t, 1, payload.AutoFix.Rounds)
+
+	require.Equal(t, "workspace-1", stub.startedWorkspace)
+	require.Equal(t, "task-1", stub.startedTaskID)
+	require.Equal(t, ChangeRequestIdentity{ConnectionScope: "connection-7", RepositoryID: "immutable-repository-9", Number: 42}, stub.startedIdentity)
+}
+
+func TestAutoFixDefaultCommandIsStart(t *testing.T) {
+	stub := &autoFixStub{report: AutoFixReport{Status: "running"}}
+	extension := autoFixExtension(stub)
+
+	_, err := extension.HandleAction(context.Background(), &pluginsdk.PluginActionRequest{
+		ActionKey: ActionChangeRequestsAutoFix,
+		Context:   pluginsdk.VerifiedActionContext{WorkspaceID: "workspace-1", TaskID: "task-1"},
+		Body:      autoFixBody(""),
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, stub.startedTaskID, "omitted command means start")
+	require.Empty(t, stub.stoppedTaskID)
+}
+
+func TestAutoFixStopCommandDelegates(t *testing.T) {
+	stub := &autoFixStub{report: AutoFixReport{Status: "stopped"}}
+	extension := autoFixExtension(stub)
+
+	_, err := extension.HandleAction(context.Background(), &pluginsdk.PluginActionRequest{
+		ActionKey: ActionChangeRequestsAutoFix,
+		Context:   pluginsdk.VerifiedActionContext{WorkspaceID: "workspace-1", TaskID: "task-1"},
+		Body:      autoFixBody("stop"),
+	})
+	require.NoError(t, err)
+	require.Equal(t, "task-1", stub.stoppedTaskID)
+	require.Empty(t, stub.startedTaskID)
+}
+
+func TestAutoFixRequiresVerifiedTaskContext(t *testing.T) {
+	stub := &autoFixStub{}
+	extension := autoFixExtension(stub)
+
+	// No task context: the loop targets a task's session — refuse.
+	_, err := extension.HandleAction(context.Background(), &pluginsdk.PluginActionRequest{
+		ActionKey: ActionChangeRequestsAutoFix,
+		Context:   pluginsdk.VerifiedActionContext{WorkspaceID: "workspace-1"},
+		Body:      autoFixBody("start"),
+	})
+	require.Error(t, err)
+
+	// No workspace context either.
+	_, err = extension.HandleAction(context.Background(), &pluginsdk.PluginActionRequest{
+		ActionKey: ActionChangeRequestsAutoFix,
+		Context:   pluginsdk.VerifiedActionContext{TaskID: "task-1"},
+		Body:      autoFixBody("start"),
+	})
+	require.Error(t, err)
+
+	// The status action holds the same bar.
+	_, err = extension.HandleAction(context.Background(), &pluginsdk.PluginActionRequest{
+		ActionKey: ActionChangeRequestsAutoFixStatus,
+		Context:   pluginsdk.VerifiedActionContext{WorkspaceID: "workspace-1"},
+		Body:      autoFixBody(""),
+	})
+	require.Error(t, err)
+	require.Zero(t, stub.statusCalls)
+}
+
+func TestAutoFixSurfacesProviderErrors(t *testing.T) {
+	stub := &autoFixStub{startErr: errors.New("boom: session is FAILED")}
+	extension := autoFixExtension(stub)
+
+	_, err := extension.HandleAction(context.Background(), &pluginsdk.PluginActionRequest{
+		ActionKey: ActionChangeRequestsAutoFix,
+		Context:   pluginsdk.VerifiedActionContext{WorkspaceID: "workspace-1", TaskID: "task-1"},
+		Body:      autoFixBody("start"),
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "boom")
+	require.Contains(t, err.Error(), "auto-fix start")
+}
+
+func TestAutoFixUnsupportedProvider(t *testing.T) {
+	extension := &Extension{ProviderID: "acme"}
+
+	for _, key := range []string{ActionChangeRequestsAutoFix, ActionChangeRequestsAutoFixStatus} {
+		_, err := extension.HandleAction(context.Background(), &pluginsdk.PluginActionRequest{
+			ActionKey: key,
+			Context:   pluginsdk.VerifiedActionContext{WorkspaceID: "workspace-1", TaskID: "task-1"},
+			Body:      autoFixBody("start"),
+		})
+		require.Error(t, err, key)
+		require.Contains(t, err.Error(), "does not support auto-fix", key)
+	}
+}
+
+func TestAutoFixStatusReturnsReportAndFound(t *testing.T) {
+	stub := &autoFixStub{report: AutoFixReport{Status: "done", Rounds: 2, Message: "green"}, found: true}
+	extension := autoFixExtension(stub)
+
+	response, err := extension.HandleAction(context.Background(), &pluginsdk.PluginActionRequest{
+		ActionKey: ActionChangeRequestsAutoFixStatus,
+		Context:   pluginsdk.VerifiedActionContext{WorkspaceID: "workspace-1", TaskID: "task-1"},
+		Body:      autoFixBody(""),
+	})
+	require.NoError(t, err)
+
+	var payload struct {
+		AutoFix AutoFixReport `json:"auto_fix"`
+		Found   bool          `json:"found"`
+	}
+	require.NoError(t, json.Unmarshal(response.Body, &payload))
+	require.Equal(t, "done", payload.AutoFix.Status)
+	require.True(t, payload.Found)
+	require.Equal(t, 1, stub.statusCalls)
+	require.Equal(t, ChangeRequestIdentity{ConnectionScope: "connection-7", RepositoryID: "immutable-repository-9", Number: 42}, stub.statusIdentity)
+}
+
+func TestAutoFixRejectsIncompleteIdentityAndUnknownCommand(t *testing.T) {
+	stub := &autoFixStub{}
+	extension := autoFixExtension(stub)
+
+	_, err := extension.HandleAction(context.Background(), &pluginsdk.PluginActionRequest{
+		ActionKey: ActionChangeRequestsAutoFix,
+		Context:   pluginsdk.VerifiedActionContext{WorkspaceID: "workspace-1", TaskID: "task-1"},
+		Body:      []byte(`{"connection_scope":"connection-7","number":42}`),
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "incomplete")
+
+	_, err = extension.HandleAction(context.Background(), &pluginsdk.PluginActionRequest{
+		ActionKey: ActionChangeRequestsAutoFix,
+		Context:   pluginsdk.VerifiedActionContext{WorkspaceID: "workspace-1", TaskID: "task-1"},
+		Body:      autoFixBody("pause"),
+	})
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unknown auto-fix command")
+	require.Empty(t, stub.startedTaskID)
 }
