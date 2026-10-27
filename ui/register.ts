@@ -100,6 +100,10 @@ window.registerKandevPlugin("kandev-plugin-github-lite", {
       matchesURL: matchesGitHubURL,
       parseReference: parseGitHubPullReference,
       toChangeRequestDetail: toGitHubPullDetail,
+      autoFix: {
+        label: "Auto-fix CI",
+        stopLabel: "Stop auto-fix",
+      },
     });
   },
   destroy() {

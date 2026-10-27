@@ -1,21 +1,28 @@
 # kandev-plugin-github-lite — an API-frugal GitHub source-control plugin.
 #
-# Provides exactly two things, and deliberately nothing else:
+# Provides exactly three things, and deliberately nothing else:
 #   1. GitHub repositories in the task-create-from-URL / repository pickers.
 #   2. Pull-request status on tasks: link/unlink from the Link dialog or by
 #      pasting a PR reference into a message, plus a card indicator, top-bar
 #      status, CI chip, and PR detail panel for every linked pull request.
+#   3. A per-PR "Auto-fix" button: a bounded, press-triggered loop that
+#      drives the task's session through @ci-auto-fix-style rounds — fix the
+#      failing checks, resolve merge conflicts, address the token owner's
+#      new or changed PR comments — until the PR is green, the rounds run
+#      out, or nothing is left actionable.
 #
 # It never browses GitHub: no issue watching, no PR dashboard, no review
 # queue, and no GitHub search API (which is capped at 30 req/min regardless
 # of token). All calls are core REST, made on demand, behind a TTL cache.
 # There is no background poller: the recipe contract forbids one, so the
-# plugin only ever touches the API when you interact with a task.
+# plugin only ever touches the API when you interact with a task — the
+# auto-fix loop included, which exists only between an explicit button press
+# and its terminal state, with every wait a bounded window.
 id: "kandev-plugin-github-lite"
 api_version: 1
-version: "0.1.9"
+version: "0.2.0"
 display_name: "GitHub Lite"
-description: "API-frugal GitHub source control for kandev: repositories for task creation, and pull-request status linked to tasks. No dashboards, no issue watching, no GitHub search API."
+description: "API-frugal GitHub source control for kandev: repositories for task creation, pull-request status linked to tasks, and a bounded press-triggered @ci-auto-fix loop per pull request. No dashboards, no issue watching, no GitHub search API."
 author: "Prithpal-Sooriya"
 categories: ["connector", "tools"]
 license: "MIT"
@@ -39,14 +46,28 @@ runtime:
 
 # capabilities:
 #   api_read:tasks       — auto-attach resolves a task's checkout branch and
-#                          linked repository rows through Host.Tasks().
+#                          linked repository rows through Host.Tasks(); the
+#                          auto-fix loop waits on the task's session the same
+#                          way.
 #   api_read:repositories — the same resolution and the repository pickers
 #                          read workspace repository rows through
 #                          Host.Repositories().
+#   api_read:sessions    — the auto-fix loop polls its task's session state
+#                          (host-local; no GitHub traffic) to know when each
+#                          round's agent turn finishes.
+#   api_read:messages    — reserved for loop diagnostics; not used yet.
+#   api_write:messages   — each auto-fix round delivers its prompt to the
+#                          task's primary session through Host.Messages()
+#                          Send (the same delivery path kandev's message_task
+#                          uses): queued while the session runs, resumed and
+#                          prompted when idle.
 #   state                — link/unlink associations are stored in Host state
-#                          (scope "workspace", one key per task).
+#                          (scope "workspace", one key per task), and the
+#                          auto-fix loop persists its per-PR status there for
+#                          the panel's zero-GitCalls status polls.
 capabilities:
-  api_read: ["tasks", "repositories"]
+  api_read: ["tasks", "repositories", "sessions", "messages"]
+  api_write: ["messages"]
   state: true
 
 # Provider ownership for URLs and reference sources. "github" itself is
@@ -94,6 +115,12 @@ actions:
   - key: "change_requests.associations"
     scope: "workspace"
     max_body_bytes: 1024
+  - key: "change_requests.auto_fix"
+    scope: "task"
+    max_body_bytes: 4096
+  - key: "change_requests.auto_fix_status"
+    scope: "task"
+    max_body_bytes: 4096
 
 # No webhooks. The plugin is entirely pull-based; nothing needs to be
 # curl-able from outside kandev.
@@ -132,4 +159,14 @@ config_schema:
       type: integer
       title: "Repository list pages (max)"
       description: "Upper bound on pages fetched per repository list request (100 repos per page). Kept small to stay frugal with the API."
+      default: 3
+    auto_fix_enabled:
+      type: boolean
+      title: "Enable CI auto-fix"
+      description: "Show the Auto-fix button on pull request panels. The loop only ever runs when pressed — this only gates the surface."
+      default: true
+    auto_fix_max_rounds:
+      type: integer
+      title: "Auto-fix rounds (max)"
+      description: "How many fix rounds one Auto-fix press may run (each round dispatches one @ci-auto-fix prompt to the task and waits for the result)."
       default: 3

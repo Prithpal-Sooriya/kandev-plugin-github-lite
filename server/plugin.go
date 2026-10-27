@@ -41,6 +41,7 @@ func newPlugin() *githubLitePlugin {
 		Associations:         plugin.adapters,
 		Reviews:              plugin.adapters,
 		References:           plugin.adapters,
+		AutoFix:              plugin.adapters,
 	}
 	return plugin
 }

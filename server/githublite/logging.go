@@ -14,7 +14,7 @@ import (
 // invocation, never per GitHub request.
 var logger = hclog.New(&hclog.LoggerOptions{
 	Name:       "github-lite",
-	Output:      os.Stderr,
-	Level:       hclog.Info,
-	JSONFormat:  true,
+	Output:     os.Stderr,
+	Level:      hclog.Info,
+	JSONFormat: true,
 })

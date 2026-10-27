@@ -24,6 +24,12 @@ const (
 	ActionChangeRequestsLink        = "change_requests.link"
 	ActionChangeRequestsUnlink      = "change_requests.unlink"
 	ActionChangeRequestAssociations = "change_requests.associations"
+	// ActionChangeRequestsAutoFix starts/stops a bounded, user-triggered
+	// auto-fix loop for one change request (see ChangeRequestAutoFixer).
+	ActionChangeRequestsAutoFix = "change_requests.auto_fix"
+	// ActionChangeRequestsAutoFixStatus reads the persisted loop status —
+	// a zero-provider-traffic read the UI polls while mounted.
+	ActionChangeRequestsAutoFixStatus = "change_requests.auto_fix_status"
 )
 
 // Repository holds credential-free provider identity and display/routing data.
@@ -48,8 +54,8 @@ type Repository struct {
 	// flow reads these to preselect the PR's head branch (base_branch of the
 	// created task) and to prefill the task title — without them the flow
 	// falls back to the repository's default branch.
-	HeadBranch string         `json:"head_branch,omitempty"`
-	BaseBranch string         `json:"base_branch,omitempty"`
+	HeadBranch  string          `json:"head_branch,omitempty"`
+	BaseBranch  string          `json:"base_branch,omitempty"`
 	PullRequest *PullRequestRef `json:"pull_request,omitempty"`
 }
 
@@ -194,6 +200,39 @@ type TaskReviewSyncer interface {
 	SyncTask(context.Context, string, string) ([]ReviewSummary, error)
 }
 
+// AutoFixReport is the provider-neutral loop status the auto-fix actions
+// exchange with the UI. Statuses: "idle" (never run), "running" (loop
+// alive), "done", "stopped", "needs_input" (the agent asked the user
+// something), "error", "interrupted" (the plugin restarted mid-loop).
+// UpdatedAt is unix milliseconds.
+type AutoFixReport struct {
+	ProviderID          string `json:"provider_id"`
+	TaskID              string `json:"task_id,omitempty"`
+	RepositoryID        string `json:"repository_id"`
+	ChangeRequestNumber int64  `json:"change_request_number"`
+	Running             bool   `json:"running"`
+	Status              string `json:"status"`
+	Rounds              int    `json:"rounds,omitempty"`
+	MaxRounds           int    `json:"max_rounds,omitempty"`
+	Message             string `json:"message,omitempty"`
+	UpdatedAt           int64  `json:"updated_at"`
+}
+
+// ChangeRequestAutoFixer is the optional capability behind the
+// change_requests.auto_fix and change_requests.auto_fix_status actions:
+// a bounded, user-triggered loop that drives the task's session through
+// rounds of provider feedback (failing checks, merge conflicts, new or
+// changed comments) until the change request is green or the rounds are
+// exhausted. Start returns immediately — the rounds are asynchronous —
+// and Status must cost zero provider calls (the UI polls it). Providers
+// may leave this unimplemented; the actions then report auto-fix as
+// unsupported.
+type ChangeRequestAutoFixer interface {
+	StartAutoFix(ctx context.Context, workspaceID, taskID string, identity ChangeRequestIdentity) (AutoFixReport, error)
+	StopAutoFix(ctx context.Context, workspaceID, taskID string, identity ChangeRequestIdentity) (AutoFixReport, error)
+	AutoFixStatus(ctx context.Context, workspaceID, taskID string, identity ChangeRequestIdentity) (AutoFixReport, bool, error)
+}
+
 // Extension implements optional plugin SDK surfaces. Embed or delegate to it
 // from the concrete value passed to pluginsdk.Serve.
 type Extension struct {
@@ -206,6 +245,10 @@ type Extension struct {
 	Associations         AssociationStore
 	Reviews              ReviewReader
 	References           ReferenceService
+	// AutoFix is the optional bounded auto-fix loop capability
+	// (change_requests.auto_fix / change_requests.auto_fix_status). Nil
+	// when the provider does not implement it.
+	AutoFix ChangeRequestAutoFixer
 }
 
 var _ pluginsdk.ActionHandler = (*Extension)(nil)
@@ -236,6 +279,10 @@ func (e *Extension) HandleAction(ctx context.Context, request *pluginsdk.PluginA
 		return e.linkChangeRequest(ctx, request)
 	case ActionChangeRequestsUnlink:
 		return e.unlinkChangeRequest(ctx, request)
+	case ActionChangeRequestsAutoFix:
+		return e.autoFixChangeRequest(ctx, request)
+	case ActionChangeRequestsAutoFixStatus:
+		return e.autoFixChangeRequestStatus(ctx, request)
 	default:
 		return nil, fmt.Errorf("source-control recipe: unsupported action %q", request.ActionKey)
 	}
@@ -440,6 +487,84 @@ func validateChangeRequestIdentity(identity ChangeRequestIdentity) error {
 		return errors.New("source-control recipe: change-request identity is incomplete")
 	}
 	return nil
+}
+
+// autoFixInput decodes the auto-fix actions' shared body: the change
+// request's immutable identity plus (for auto_fix only) the command.
+type autoFixInput struct {
+	ConnectionScope string `json:"connection_scope"`
+	RepositoryID    string `json:"repository_id"`
+	Number          int64  `json:"number"`
+	Command         string `json:"command"`
+}
+
+// autoFixChangeRequest is the start/stop press behind the loop's button.
+// Start launches a bounded asynchronous loop and returns its live report
+// immediately (a running loop never blocks the 15-second action budget);
+// stop cancels one. Pressing start while a loop runs is an idempotent
+// report of the current status, never a second loop.
+func (e *Extension) autoFixChangeRequest(ctx context.Context, request *pluginsdk.PluginActionRequest) (*pluginsdk.PluginActionResponse, error) {
+	if strings.TrimSpace(request.Context.WorkspaceID) == "" || strings.TrimSpace(request.Context.TaskID) == "" {
+		return nil, errors.New("source-control recipe: auto-fix requires verified workspace and task context")
+	}
+	if e.AutoFix == nil {
+		return nil, fmt.Errorf("source-control recipe: provider %q does not support auto-fix", e.ProviderID)
+	}
+	var input autoFixInput
+	if err := json.Unmarshal(request.Body, &input); err != nil {
+		return nil, fmt.Errorf("source-control recipe: decode auto-fix body: %w", err)
+	}
+	identity := ChangeRequestIdentity{
+		ConnectionScope: strings.TrimSpace(input.ConnectionScope),
+		RepositoryID:    strings.TrimSpace(input.RepositoryID),
+		Number:          input.Number,
+	}
+	if err := validateChangeRequestIdentity(identity); err != nil {
+		return nil, err
+	}
+	var report AutoFixReport
+	var err error
+	switch strings.ToLower(strings.TrimSpace(input.Command)) {
+	case "", "start":
+		report, err = e.AutoFix.StartAutoFix(ctx, request.Context.WorkspaceID, request.Context.TaskID, identity)
+	case "stop":
+		report, err = e.AutoFix.StopAutoFix(ctx, request.Context.WorkspaceID, request.Context.TaskID, identity)
+	default:
+		return nil, fmt.Errorf("source-control recipe: unknown auto-fix command %q (expected start or stop)", input.Command)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("source-control recipe: auto-fix %s: %w", strings.ToLower(strings.TrimSpace(input.Command)), err)
+	}
+	return jsonResponse(map[string]any{"auto_fix": report})
+}
+
+// autoFixChangeRequestStatus is the zero-provider-traffic status read the
+// UI polls while mounted. found is false when no loop ever ran for the
+// identity — the UI renders an idle state from that.
+func (e *Extension) autoFixChangeRequestStatus(ctx context.Context, request *pluginsdk.PluginActionRequest) (*pluginsdk.PluginActionResponse, error) {
+	if strings.TrimSpace(request.Context.WorkspaceID) == "" || strings.TrimSpace(request.Context.TaskID) == "" {
+		return nil, errors.New("source-control recipe: auto-fix status requires verified workspace and task context")
+	}
+	if e.AutoFix == nil {
+		return nil, fmt.Errorf("source-control recipe: provider %q does not support auto-fix", e.ProviderID)
+	}
+	var input autoFixInput
+	if err := json.Unmarshal(request.Body, &input); err != nil {
+		return nil, fmt.Errorf("source-control recipe: decode auto-fix status body: %w", err)
+	}
+	identity := ChangeRequestIdentity{
+		ConnectionScope: strings.TrimSpace(input.ConnectionScope),
+		RepositoryID:    strings.TrimSpace(input.RepositoryID),
+		Number:          input.Number,
+	}
+	if err := validateChangeRequestIdentity(identity); err != nil {
+		return nil, err
+	}
+	report, found, err := e.AutoFix.AutoFixStatus(ctx, request.Context.WorkspaceID, request.Context.TaskID, identity)
+	if err != nil {
+		return nil, fmt.Errorf("source-control recipe: auto-fix status: %w", err)
+	}
+	return jsonResponse(map[string]any{"auto_fix": report, "found": found})
 }
 
 func (e *Extension) listRepositories(ctx context.Context, request *pluginsdk.PluginActionRequest) (*pluginsdk.PluginActionResponse, error) {
