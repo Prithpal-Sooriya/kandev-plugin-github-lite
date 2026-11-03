@@ -867,6 +867,7 @@ describe("auto-fix loop surface", () => {
       const detail = panel.lastDetail()!;
       expect(detail.props.actions).toEqual([
         expect.objectContaining({ id: "auto_fix", label: "Stop auto-fix", placement: "header" }),
+        expect.objectContaining({ id: "watch", label: "Watch CI", placement: "header" }),
       ]);
       expect((detail.props.notice as { props: { children: { props: { children: string } } } }).props.children.props.children).toContain("round 1/3 dispatched");
       expect(detail.props.busyActionId).toBeNull();
@@ -922,6 +923,46 @@ describe("auto-fix loop surface", () => {
       await (detail.props.onAction as (request: { actionId: string }) => Promise<void>)({ actionId: "auto_fix" });
       expect(commands).toEqual(["start", "stop"]);
 
+      cleanup();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("toggles watch mode through the same action and shows the watch status", async () => {
+    vi.useFakeTimers();
+    try {
+      const commands: string[] = [];
+      let watching = false;
+      const test = harness(
+        autoFixResponder({
+          status: () => ({ auto_fix: { running: false, status: "idle", watching, watch_message: "green and up to date", watch_expires_at: 0 }, found: false }),
+          command: (command) => {
+            commands.push(command);
+            watching = command === "watch";
+            return { auto_fix: { running: false, status: "idle", watching, watch_message: "watching — checking soon" } };
+          },
+        }),
+        { autoFix: {} },
+      );
+      await seedReview(test);
+
+      test.reviewProvider!.ReviewPanel(autoFixPanelProps);
+      const panel = mountAutoFixPanel(test, autoFixPanelProps);
+      const cleanup = test.miniReact.getEffects()[0]!() as () => void;
+      await vi.advanceTimersByTimeAsync(0);
+
+      let detail = panel.lastDetail()!;
+      expect((detail.props.actions as Array<Record<string, unknown>>)[1]!.label).toBe("Watch CI");
+      await (detail.props.onAction as (request: { actionId: string }) => Promise<void>)({ actionId: "watch" });
+      expect(commands).toEqual(["watch"]);
+
+      detail = panel.lastDetail()!;
+      expect((detail.props.actions as Array<Record<string, unknown>>)[1]!.label).toBe("Stop watching");
+      expect((detail.props.notice as { props: { children: { props: { children: string } } } }).props.children.props.children).toContain("Watching");
+
+      await (detail.props.onAction as (request: { actionId: string }) => Promise<void>)({ actionId: "watch" });
+      expect(commands).toEqual(["watch", "unwatch"]);
       cleanup();
     } finally {
       vi.useRealTimers();

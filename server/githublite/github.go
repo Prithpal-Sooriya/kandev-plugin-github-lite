@@ -9,6 +9,7 @@ type apiUser struct {
 	Login   string `json:"login"`
 	HTMLURL string `json:"html_url"`
 	Avatar  string `json:"avatar_url"`
+	Type    string `json:"type"` // "User" | "Bot"
 }
 
 type apiRepository struct {

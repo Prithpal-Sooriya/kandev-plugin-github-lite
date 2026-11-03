@@ -4,6 +4,36 @@ All notable changes to this plugin are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com); versions match
 `manifest.yaml` (and the `Makefile`).
 
+## [0.3.0] — Watch CI (babysit mode) and reviewer-aware auto-fix
+
+The Auto-fix button needed a press every time. **Watch CI** removes the
+press — without a free-running poller.
+
+- **Watch CI toggle** next to Auto-fix on every PR panel. A watched PR gets
+  the same bounded `@ci-auto-fix` loop started automatically whenever it
+  turns red, conflicts, or receives new feedback. Works across any number of
+  tasks, independent of which window is open.
+- **Bounded by construction.** Per-PR opt-in, expires after
+  `auto_fix_watch_hours` (8), one shared sweep every `auto_fix_watch_minutes`
+  (5, floored at the cache TTL and 2 min) that reads each watched PR fresh
+  but scoped to its repo and costs nothing when nothing is watched, a
+  `auto_fix_watch_daily_runs` (6) budget per PR, a no-progress guard (same
+  head SHA + no new feedback → wait), a pause while the session needs input,
+  and an automatic end on merge, close or unlink.
+- **Watch all linked pull requests** setting (off by default) enrols linked
+  open PRs as the reviews refresh sees them; an explicit *Stop watching* is
+  never overridden. Persisted watches re-arm on the next workspace touch
+  after a plugin restart.
+- **Auto-fix now reads everyone's feedback, with judgment.** Review-thread
+  comments, PR comments and review summaries (changes requested / commented)
+  from any author are dispatched; the agent is told to fix what is right,
+  answer questions, push back when a suggestion is wrong, and prefix every
+  GitHub reply with **🤖**. 🤖 replies, bot accounts and already-answered
+  threads are filtered so the agent never reacts to itself.
+- Config: `auto_fix_watch_all`, `auto_fix_watch_hours`,
+  `auto_fix_watch_minutes`, `auto_fix_watch_daily_runs`. Same capabilities —
+  no new permissions.
+
 ## [0.2.0] — Auto-fix CI button ("@ci-auto-fix" loop)
 
 The built-in GitHub integration ships a magic "@ci-auto-fix" prompt that

@@ -93,13 +93,15 @@ type autoFixDocument struct {
 }
 
 // autoFixCheckpoint is what the loop has already dispatched feedback for.
-// Comments (review-thread and issue) authored by the token owner are listed
-// only while new or changed since the round that saw them, exactly like the
+// Comments (review-thread and issue) and review summaries from anyone — bots
+// and the agent's own "🤖" replies excepted — are listed only while new or
+// changed since the round that saw them, exactly like the
 // built-in automation's delta — a re-press after needs_input/stopped resumes
 // from this checkpoint instead of re-listing everything.
 type autoFixCheckpoint struct {
 	SeenReviewComments map[string]string `json:"seen_review_comments,omitempty"` // id -> updated_at (RFC3339)
 	SeenIssueComments  map[string]string `json:"seen_issue_comments,omitempty"`  // id -> updated_at
+	SeenReviews        map[string]string `json:"seen_reviews,omitempty"`         // review id -> submitted_at
 	FailedChecks       map[string]string `json:"failed_checks,omitempty"`        // name -> conclusion (last dispatched)
 	ConflictSeen       bool              `json:"conflict_seen,omitempty"`        // conflict state at last dispatched round
 	HeadSHA            string            `json:"head_sha,omitempty"`             // head SHA at last dispatched round
@@ -112,8 +114,9 @@ type autoFixDelta struct {
 	MergeableState    string
 	FailedChecks      []apiCheckRun
 	PendingChecks     int
-	MyReviewComments  []apiReviewComment
-	MyIssueComments   []apiIssueComment
+	ReviewComments    []apiReviewComment
+	IssueComments     []apiIssueComment
+	ReviewBodies      []apiReview // review summaries with a body (changes requested / commented)
 	HeadSHA           string
 	HeadBranch        string
 	BaseBranch        string
@@ -124,7 +127,13 @@ type autoFixDelta struct {
 }
 
 func (d *autoFixDelta) actionable() bool {
-	return d.Conflict || len(d.FailedChecks) > 0 || len(d.MyReviewComments) > 0 || len(d.MyIssueComments) > 0
+	return d.Conflict || len(d.FailedChecks) > 0 || d.hasFeedback()
+}
+
+// hasFeedback reports whether any human feedback (comments or review
+// summaries) is new or changed relative to the checkpoint.
+func (d *autoFixDelta) hasFeedback() bool {
+	return len(d.ReviewComments) > 0 || len(d.IssueComments) > 0 || len(d.ReviewBodies) > 0
 }
 
 // signature fingerprints the delta; used for diagnostics and to keep the
@@ -142,13 +151,16 @@ func (d *autoFixDelta) signature() string {
 		checks = append(checks, flatCheck{check.Name, check.Conclusion})
 	}
 	sort.Slice(checks, func(i, j int) bool { return checks[i].Name < checks[j].Name })
-	reviews := make([]flatComment, 0, len(d.MyReviewComments))
-	for _, comment := range d.MyReviewComments {
+	reviews := make([]flatComment, 0, len(d.ReviewComments))
+	for _, comment := range d.ReviewComments {
 		reviews = append(reviews, flatComment{strconv.FormatInt(comment.ID, 10), comment.Body, comment.User.Login, timestampString(comment.UpdatedAt)})
 	}
+	for _, review := range d.ReviewBodies {
+		reviews = append(reviews, flatComment{"review-" + strconv.FormatInt(review.ID, 10), review.Body, review.User.Login, reviewSubmittedAt(review)})
+	}
 	sort.Slice(reviews, func(i, j int) bool { return reviews[i].ID < reviews[j].ID })
-	issues := make([]flatComment, 0, len(d.MyIssueComments))
-	for _, comment := range d.MyIssueComments {
+	issues := make([]flatComment, 0, len(d.IssueComments))
+	for _, comment := range d.IssueComments {
 		issues = append(issues, flatComment{strconv.FormatInt(comment.ID, 10), comment.Body, comment.User.Login, timestampString(comment.CreatedAt)})
 	}
 	sort.Slice(issues, func(i, j int) bool { return issues[i].ID < issues[j].ID })
@@ -286,7 +298,7 @@ func (a *Adapters) StartAutoFix(ctx context.Context, workspaceID, taskID string,
 	// Already running? Report the live status — an idempotent press, not an
 	// error and never a second loop.
 	if loop := a.activeAutoFixLoop(key); loop != nil {
-		return loopReport(providerID, loop), nil
+		return a.attachWatch(ctx, workspaceID, taskID, identity, loopReport(providerID, loop)), nil
 	}
 
 	// Resolve the PR (one TTL-cached read — the panel that rendered the
@@ -306,7 +318,7 @@ func (a *Adapters) StartAutoFix(ctx context.Context, workspaceID, taskID string,
 		return recipe.AutoFixReport{}, fmt.Errorf("github-lite: pull request %s/%s#%d is already %s — nothing to auto-fix", owner, name, identity.Number, prLifecycleState(pull))
 	}
 
-	// Warm the token-owner scope once: "my comments" filtering needs it.
+	// Warm the token-owner scope once (the connection identity).
 	scope, err := a.ConnectionScope(ctx, workspaceID)
 	if err != nil {
 		return recipe.AutoFixReport{}, err
@@ -366,7 +378,7 @@ func (a *Adapters) StartAutoFix(ctx context.Context, workspaceID, taskID string,
 	}
 	go a.autoFixRun(loopCtx, loop, target)
 	logger.Info("auto-fix loop started", "workspace", workspaceID, "task_id", taskID, "pr", fmt.Sprintf("%s/%s#%d", owner, name, identity.Number), "max_rounds", maxRounds)
-	return autoFixReportFromDoc(providerID, doc), nil
+	return a.attachWatch(ctx, workspaceID, taskID, identity, autoFixReportFromDoc(providerID, doc)), nil
 }
 
 // StopAutoFix cancels a running loop and marks it stopped. The goroutine
@@ -389,7 +401,7 @@ func (a *Adapters) StopAutoFix(ctx context.Context, workspaceID, taskID string, 
 			return recipe.AutoFixReport{}, err
 		}
 		if !found {
-			return idleAutoFixReport(providerID, taskID, identity), nil
+			return a.attachWatch(ctx, workspaceID, taskID, identity, idleAutoFixReport(providerID, taskID, identity)), nil
 		}
 		if doc.Status == autoFixStatusRunning {
 			// "running" with no live goroutine: interrupted by a restart —
@@ -409,7 +421,7 @@ func (a *Adapters) StopAutoFix(ctx context.Context, workspaceID, taskID string, 
 				_ = a.writeAutoFixDocument(ctx, workspaceID, doc)
 			}
 		}
-		return autoFixReportFromDoc(providerID, doc), nil
+		return a.attachWatch(ctx, workspaceID, taskID, identity, autoFixReportFromDoc(providerID, doc)), nil
 	}
 
 	loop.requestStop()
@@ -431,7 +443,7 @@ func (a *Adapters) StopAutoFix(ctx context.Context, workspaceID, taskID string, 
 	loop.mu.Lock()
 	loop.status = doc
 	loop.mu.Unlock()
-	return autoFixReportFromDoc(providerID, doc), nil
+	return a.attachWatch(ctx, workspaceID, taskID, identity, autoFixReportFromDoc(providerID, doc)), nil
 }
 
 // AutoFixStatus reads the persisted loop status — zero GitHub calls; the UI
@@ -446,6 +458,7 @@ func (a *Adapters) AutoFixStatus(ctx context.Context, workspaceID, taskID string
 	if err := validateIdentityForAutoFix(workspaceID, taskID, identity); err != nil {
 		return recipe.AutoFixReport{}, false, err
 	}
+	a.ensureWatcher(workspaceID)
 	if !a.config.AutoFixEnabled {
 		report := idleAutoFixReport(providerID, taskID, identity)
 		report.Status = "unsupported"
@@ -458,7 +471,7 @@ func (a *Adapters) AutoFixStatus(ctx context.Context, workspaceID, taskID string
 		return recipe.AutoFixReport{}, false, err
 	}
 	if !found {
-		return idleAutoFixReport(providerID, taskID, identity), false, nil
+		return a.attachWatch(ctx, workspaceID, taskID, identity, idleAutoFixReport(providerID, taskID, identity)), false, nil
 	}
 	if doc.Status == autoFixStatusRunning && live == nil {
 		// "running" doc with no live goroutine — but the loop may have
@@ -478,7 +491,7 @@ func (a *Adapters) AutoFixStatus(ctx context.Context, workspaceID, taskID string
 			doc = fresh
 		}
 	}
-	return autoFixReportFromDoc(providerID, doc), true, nil
+	return a.attachWatch(ctx, workspaceID, taskID, identity, autoFixReportFromDoc(providerID, doc)), true, nil
 }
 
 func idleAutoFixReport(providerID, taskID string, identity recipe.ChangeRequestIdentity) recipe.AutoFixReport {
@@ -515,7 +528,7 @@ type autoFixTarget struct {
 	owner       string
 	name        string
 	number      int64
-	scope       string // token owner login — "my comments" filter
+	scope       string // token owner login (connection scope)
 }
 
 // autoFixRun is the bounded loop goroutine. Every GitHub read it makes is
@@ -856,7 +869,7 @@ func (a *Adapters) autoFixWaitPending(ctx context.Context, target autoFixTarget)
 		if pull.Merged || pull.State == "closed" {
 			return &autoFixDelta{PullMerged: pull.Merged, PullClosed: pull.State == "closed", PullLifecycle: prLifecycleState(pull)}, nil
 		}
-		delta := autoFixClassify(status, reviewComments, autoFixCheckpoint{}, target.scope)
+		delta := autoFixClassify(status, reviewComments, autoFixCheckpoint{})
 		if delta.actionable() {
 			return delta, nil
 		}
@@ -911,12 +924,12 @@ func (a *Adapters) autoFixReadDelta(ctx context.Context, target autoFixTarget, c
 	if status == nil || status.pull == nil {
 		return nil, fmt.Errorf("pull request %s/%s#%d not found", target.owner, target.name, target.number)
 	}
-	delta := autoFixClassify(status, reviewComments, checkpoint, target.scope)
+	delta := autoFixClassify(status, reviewComments, checkpoint)
 	return delta, nil
 }
 
 // autoFixClassify folds one PR read into the round's actionable delta.
-func autoFixClassify(status *prStatus, reviewComments []apiReviewComment, checkpoint autoFixCheckpoint, scope string) *autoFixDelta {
+func autoFixClassify(status *prStatus, reviewComments []apiReviewComment, checkpoint autoFixCheckpoint) *autoFixDelta {
 	pull := status.pull
 	delta := &autoFixDelta{
 		MergeableState:    pull.MergeableState,
@@ -939,25 +952,48 @@ func autoFixClassify(status *prStatus, reviewComments []apiReviewComment, checkp
 			delta.PendingChecks++
 		}
 	}
+	handled := agentReplyMarks(reviewComments, status.comments)
 	for _, comment := range reviewComments {
-		if scope != "" && !strings.EqualFold(comment.User.Login, scope) {
-			continue // only the token owner's comments are this loop's brief
+		if !humanFeedbackAuthor(comment.User, comment.Body) {
+			continue
 		}
 		id := strconv.FormatInt(comment.ID, 10)
 		if seen, ok := checkpoint.SeenReviewComments[id]; ok && seen == timestampString(comment.UpdatedAt) {
 			continue // already dispatched, unchanged since
 		}
-		delta.MyReviewComments = append(delta.MyReviewComments, comment)
+		if handled.threadAnswered(comment) {
+			continue // the agent already replied (🤖) in this thread
+		}
+		delta.ReviewComments = append(delta.ReviewComments, comment)
 	}
 	for _, comment := range status.comments {
-		if scope != "" && !strings.EqualFold(comment.User.Login, scope) {
+		if !humanFeedbackAuthor(comment.User, comment.Body) {
 			continue
 		}
 		id := strconv.FormatInt(comment.ID, 10)
 		if seen, ok := checkpoint.SeenIssueComments[id]; ok && seen == timestampString(comment.CreatedAt) {
 			continue
 		}
-		delta.MyIssueComments = append(delta.MyIssueComments, comment)
+		if comment.CreatedAt != nil && !handled.issueLatest.IsZero() && comment.CreatedAt.Before(handled.issueLatest) {
+			continue // older than the agent's latest PR-level 🤖 reply
+		}
+		delta.IssueComments = append(delta.IssueComments, comment)
+	}
+	for _, review := range status.reviews {
+		if strings.TrimSpace(review.Body) == "" || (review.State != "CHANGES_REQUESTED" && review.State != "COMMENTED") {
+			continue
+		}
+		if !humanFeedbackAuthor(review.User, review.Body) {
+			continue
+		}
+		id := strconv.FormatInt(review.ID, 10)
+		if seen, ok := checkpoint.SeenReviews[id]; ok && seen == reviewSubmittedAt(review) {
+			continue
+		}
+		if review.SubmittedAt != nil && !handled.issueLatest.IsZero() && review.SubmittedAt.Before(handled.issueLatest) {
+			continue
+		}
+		delta.ReviewBodies = append(delta.ReviewBodies, review)
 	}
 	return delta
 }
@@ -965,12 +1001,12 @@ func autoFixClassify(status *prStatus, reviewComments []apiReviewComment, checkp
 // feedbackDiffersFromCheckpoint reports whether anything in the feedback
 // delta is new or changed relative to the checkpoint: new or edited comments,
 // a conflict appearing or clearing, or a changed failing-check set.
-// (Comment deltas are already folded into MyReviewComments/MyIssueComments
+// (Comment deltas are already folded into ReviewComments/IssueComments
 // by autoFixClassify — non-empty means new feedback. A conflict that
 // persists across rounds is NOT new feedback — re-sending the same ask is
 // the no-progress case.)
 func (d *autoFixDelta) feedbackDiffersFromCheckpoint(checkpoint *autoFixCheckpoint) bool {
-	if len(d.MyReviewComments) > 0 || len(d.MyIssueComments) > 0 {
+	if d.hasFeedback() {
 		return true
 	}
 	if d.Conflict != checkpoint.ConflictSeen {
@@ -993,6 +1029,7 @@ func checkpointFromDelta(previous *autoFixCheckpoint, delta *autoFixDelta) autoF
 	next := autoFixCheckpoint{
 		SeenReviewComments: map[string]string{},
 		SeenIssueComments:  map[string]string{},
+		SeenReviews:        map[string]string{},
 		FailedChecks:       map[string]string{},
 		ConflictSeen:       delta.Conflict,
 		HeadSHA:            delta.HeadSHA,
@@ -1003,14 +1040,17 @@ func checkpointFromDelta(previous *autoFixCheckpoint, delta *autoFixDelta) autoF
 	for id, updated := range previous.SeenIssueComments {
 		next.SeenIssueComments[id] = updated
 	}
-	for name, conclusion := range previous.FailedChecks {
-		next.FailedChecks[name] = conclusion
+	for id, submitted := range previous.SeenReviews {
+		next.SeenReviews[id] = submitted
 	}
-	for _, comment := range delta.MyReviewComments {
+	for _, comment := range delta.ReviewComments {
 		next.SeenReviewComments[strconv.FormatInt(comment.ID, 10)] = timestampString(comment.UpdatedAt)
 	}
-	for _, comment := range delta.MyIssueComments {
+	for _, comment := range delta.IssueComments {
 		next.SeenIssueComments[strconv.FormatInt(comment.ID, 10)] = timestampString(comment.CreatedAt)
+	}
+	for _, review := range delta.ReviewBodies {
+		next.SeenReviews[strconv.FormatInt(review.ID, 10)] = reviewSubmittedAt(review)
 	}
 	// The failed-check map mirrors the CURRENT failing set (not a union):
 	// checks that now pass leave the map, so a regression counts as new.
@@ -1019,6 +1059,68 @@ func checkpointFromDelta(previous *autoFixCheckpoint, delta *autoFixDelta) autoF
 		next.FailedChecks[check.Name] = check.Conclusion
 	}
 	return next
+}
+
+// agentReplyPrefix marks every reply the auto-fix agent posts on GitHub.
+// The same token posts the agent's replies and the user's own comments, so
+// the prefix is the only way to tell them apart: replies carrying it are
+// never fed back as feedback, and they mark the threads they answered.
+const agentReplyPrefix = "🤖"
+
+func isAgentReply(body string) bool {
+	return strings.HasPrefix(strings.TrimSpace(body), agentReplyPrefix)
+}
+
+// humanFeedbackAuthor reports whether a comment or review is feedback worth
+// dispatching: not written by a bot account and not an agent "🤖" reply.
+func humanFeedbackAuthor(user apiUser, body string) bool {
+	if strings.EqualFold(user.Type, "Bot") || strings.HasSuffix(strings.ToLower(user.Login), "[bot]") {
+		return false
+	}
+	return !isAgentReply(body)
+}
+
+func reviewSubmittedAt(review apiReview) string { return timestampString(review.SubmittedAt) }
+
+// agentReplies indexes the agent's own "🤖" replies on a PR so already-answered
+// feedback is not re-dispatched (no GitHub resolved-state needed — that is
+// GraphQL-only): threadRoots maps a review thread root id to the time of the
+// newest 🤖 reply in it; issueLatest is the newest PR-level 🤖 comment.
+type agentReplies struct {
+	threadRoots map[int64]time.Time
+	issueLatest time.Time
+}
+
+func agentReplyMarks(reviewComments []apiReviewComment, issueComments []apiIssueComment) agentReplies {
+	marks := agentReplies{threadRoots: map[int64]time.Time{}}
+	for _, comment := range reviewComments {
+		if comment.CreatedAt == nil || !isAgentReply(comment.Body) {
+			continue
+		}
+		root := comment.InReplyToID
+		if root == 0 {
+			root = comment.ID
+		}
+		if comment.CreatedAt.After(marks.threadRoots[root]) {
+			marks.threadRoots[root] = *comment.CreatedAt
+		}
+	}
+	for _, comment := range issueComments {
+		if comment.CreatedAt != nil && isAgentReply(comment.Body) && comment.CreatedAt.After(marks.issueLatest) {
+			marks.issueLatest = *comment.CreatedAt
+		}
+	}
+	return marks
+}
+
+// threadAnswered reports whether a 🤖 reply postdates the comment in its thread.
+func (m agentReplies) threadAnswered(comment apiReviewComment) bool {
+	root := comment.InReplyToID
+	if root == 0 {
+		root = comment.ID
+	}
+	replied, ok := m.threadRoots[root]
+	return ok && comment.CreatedAt != nil && comment.CreatedAt.Before(replied)
 }
 
 // autoFixComposePrompt builds the round's message. Plugin-sent messages are
@@ -1058,20 +1160,26 @@ func autoFixComposePrompt(target autoFixTarget, round, maxRounds int, delta *aut
 		b.WriteString("\n\nMerge conflict:")
 		b.WriteString("\n- the pull request has real conflicts with its base branch — merge the base branch into the head branch and resolve them")
 	}
-	if len(delta.MyReviewComments) > 0 {
-		b.WriteString("\n\nNew or changed review comments from " + target.scope + " to address:")
-		for _, comment := range delta.MyReviewComments {
+	if len(delta.ReviewComments) > 0 {
+		b.WriteString("\n\nNew or changed review-thread comments:")
+		for _, comment := range delta.ReviewComments {
 			location := comment.Path
 			if comment.Line > 0 {
 				location += fmt.Sprintf(":%d", comment.Line)
 			}
-			b.WriteString(fmt.Sprintf("\n- %s %s", location, strings.TrimSpace(comment.Body)))
+			b.WriteString(fmt.Sprintf("\n- [%s, id %d] %s %s", comment.User.Login, comment.ID, location, strings.TrimSpace(comment.Body)))
 		}
 	}
-	if len(delta.MyIssueComments) > 0 {
-		b.WriteString("\n\nNew or changed pull request comments from " + target.scope + " to address:")
-		for _, comment := range delta.MyIssueComments {
-			b.WriteString(fmt.Sprintf("\n- %s", strings.TrimSpace(comment.Body)))
+	if len(delta.ReviewBodies) > 0 {
+		b.WriteString("\n\nNew review summaries:")
+		for _, review := range delta.ReviewBodies {
+			b.WriteString(fmt.Sprintf("\n- [%s, %s] %s", review.User.Login, strings.ToLower(strings.ReplaceAll(review.State, "_", " ")), strings.TrimSpace(review.Body)))
+		}
+	}
+	if len(delta.IssueComments) > 0 {
+		b.WriteString("\n\nNew or changed pull request comments:")
+		for _, comment := range delta.IssueComments {
+			b.WriteString(fmt.Sprintf("\n- [%s] %s", comment.User.Login, strings.TrimSpace(comment.Body)))
 		}
 	}
 
@@ -1079,7 +1187,8 @@ func autoFixComposePrompt(target autoFixTarget, round, maxRounds int, delta *aut
 Instructions:
 1. Fix every failing check listed above. Re-run the failing work locally when possible, and push the fix to the head branch.
 2. Resolve the merge conflict with the base branch, if one is listed. Merge the base branch into the head branch and resolve the conflicts — do not close or reopen the pull request.
-3. Address each comment listed above: make the requested change, reply to the comment on GitHub if your tools allow it, and resolve the conversation when it is fully addressed.
+3. Use judgment on each comment and review summary listed above — do not blindly obey. Make the change when the request is clear and correct; answer questions; push back politely, with reasons, when a suggestion is wrong or out of scope; skip praise, bot noise, and anything already addressed. Resolve a conversation only when it is fully addressed.
+   Reply on GitHub (review-thread comments via the replies endpoint, PR-level comments via a PR comment; use the gh CLI or your GitHub tools) and start EVERY reply with "🤖 " — that prefix marks it as yours so it is never fed back to you as new feedback. Never post a reply without it.
 4. Checks still pending are not failures — do not react to them.
 5. Do not merge the pull request. Push fixes to the head branch only.
 6. When this round's work is done, reply with a short summary of what you fixed, pushed, and resolved.`)

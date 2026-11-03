@@ -328,6 +328,9 @@ func (a *Adapters) ForTask(ctx context.Context, workspaceID, taskID string) ([]r
 		return nil, err
 	}
 
+	// Re-arm this workspace's persisted watches after a plugin restart.
+	a.ensureWatcher(workspaceID)
+
 	seen := make(map[string]bool)
 	summaries := make([]recipe.ReviewSummary, 0)
 
@@ -389,6 +392,14 @@ func (a *Adapters) ForTask(ctx context.Context, workspaceID, taskID string) ([]r
 	sort.SliceStable(summaries, func(i, j int) bool {
 		return summaries[i].ChangeRequestNumber < summaries[j].ChangeRequestNumber
 	})
+	if a.config.AutoFixWatchAll {
+		for _, summary := range summaries {
+			if state := strings.ToLower(summary.State); state == "merged" || state == "closed" {
+				continue
+			}
+			a.enrollWatchAll(ctx, workspaceID, taskID, recipe.ChangeRequestIdentity{ConnectionScope: summary.ConnectionScope, RepositoryID: summary.RepositoryID, Number: summary.ChangeRequestNumber})
+		}
+	}
 	return summaries, nil
 }
 

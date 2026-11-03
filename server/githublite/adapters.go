@@ -37,6 +37,16 @@ type Config struct {
 	AutoFixEnabled bool
 	// AutoFixMaxRounds caps one auto-fix press's rounds (default 3).
 	AutoFixMaxRounds int64
+	// AutoFixWatchAll enrols every linked open PR in watch mode as the
+	// reviews refresh sees it (default off). Per-PR watch needs no setting.
+	AutoFixWatchAll bool
+	// AutoFixWatchHours is how long one watch lasts before it expires and
+	// must be re-armed (default 8). AutoFixWatchMinutes is the sweep
+	// interval (default 5, never below the cache TTL). AutoFixWatchDailyRuns
+	// caps watch-started fix runs per PR per day (default 6).
+	AutoFixWatchHours     int64
+	AutoFixWatchMinutes   int64
+	AutoFixWatchDailyRuns int64
 }
 
 func configFromHost(host pluginsdk.Host) (Config, error) {
@@ -44,7 +54,7 @@ func configFromHost(host pluginsdk.Host) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("github-lite: reading config: %w", err)
 	}
-	config := Config{AutoAttach: true, CacheTTL: 300, MaxListPages: 3, AutoFixEnabled: true, AutoFixMaxRounds: 3}
+	config := Config{AutoAttach: true, CacheTTL: 300, MaxListPages: 3, AutoFixEnabled: true, AutoFixMaxRounds: 3, AutoFixWatchHours: 8, AutoFixWatchMinutes: 5, AutoFixWatchDailyRuns: 6}
 	if value, ok := raw["github_token"].(string); ok {
 		config.Token = value
 	}
@@ -65,6 +75,18 @@ func configFromHost(host pluginsdk.Host) (Config, error) {
 	}
 	if value, ok := toInt(raw["auto_fix_max_rounds"]); ok && value > 0 {
 		config.AutoFixMaxRounds = value
+	}
+	if value, ok := raw["auto_fix_watch_all"].(bool); ok {
+		config.AutoFixWatchAll = value
+	}
+	if value, ok := toInt(raw["auto_fix_watch_hours"]); ok && value > 0 {
+		config.AutoFixWatchHours = value
+	}
+	if value, ok := toInt(raw["auto_fix_watch_minutes"]); ok && value > 0 {
+		config.AutoFixWatchMinutes = value
+	}
+	if value, ok := toInt(raw["auto_fix_watch_daily_runs"]); ok && value > 0 {
+		config.AutoFixWatchDailyRuns = value
 	}
 	return config, nil
 }
@@ -107,6 +129,14 @@ type Adapters struct {
 	// Host state (see autofix.go).
 	autoFixMu    sync.Mutex
 	autoFixLoops map[string]*autoFixLoop
+
+	// Watch mode (see watch.go): the workspaces whose persisted watches the
+	// single sweep goroutine covers, whether it has started, and the PRs
+	// currently being evaluated.
+	watchMu         sync.Mutex
+	watchWorkspaces map[string]bool
+	watchStarted    bool
+	watchBusy       map[string]bool
 }
 
 // NewAdapters returns adapters that resolve the Host lazily on first use.

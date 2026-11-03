@@ -46,6 +46,10 @@ export type SourceControlAutoFixOptions = {
   label?: string;
   /** Stop button label. Defaults to "Stop auto-fix". */
   stopLabel?: string;
+  /** Watch toggle label (opt-in babysitting). Defaults to "Watch CI". */
+  watchLabel?: string;
+  /** Unwatch toggle label. Defaults to "Stop watching". */
+  unwatchLabel?: string;
 };
 
 type AutoFixStatusResponse = {
@@ -61,6 +65,9 @@ type AutoFixReport = {
   maxRounds: number;
   message: string;
   updatedAt: number;
+  watching: boolean;
+  watchExpiresAt: number;
+  watchMessage: string;
 };
 
 function normalizeAutoFixReport(value: unknown): AutoFixReport | undefined {
@@ -74,10 +81,21 @@ function normalizeAutoFixReport(value: unknown): AutoFixReport | undefined {
     maxRounds: nonNegativeInteger(source.max_rounds) ?? 0,
     message: text(source.message),
     updatedAt: finiteNumber(source.updated_at) ?? 0,
+    watching: source.watching === true,
+    watchExpiresAt: finiteNumber(source.watch_expires_at) ?? 0,
+    watchMessage: text(source.watch_message),
   };
 }
 
 function autoFixNoticeText(report: AutoFixReport): string {
+  const base = autoFixLoopText(report);
+  if (!report.watching) return base;
+  const until = report.watchExpiresAt > 0 ? ` until ${new Date(report.watchExpiresAt).toLocaleTimeString()}` : "";
+  const watch = `Watching${until}${report.watchMessage ? ` — ${report.watchMessage}` : ""}`;
+  return report.status === "idle" ? watch : `${base} · ${watch}`;
+}
+
+function autoFixLoopText(report: AutoFixReport): string {
   if (report.message) return report.message;
   if (report.running) {
     const rounds =
@@ -662,11 +680,13 @@ function createAutoFixPanel(host: PluginHostApi, autoFix: SourceControlAutoFixOp
   const statusKey = autoFix.statusKey ?? "change_requests.auto_fix_status";
   const startLabel = autoFix.label ?? "Auto-fix CI";
   const stopLabel = autoFix.stopLabel ?? "Stop auto-fix";
+  const watchLabel = autoFix.watchLabel ?? "Watch CI";
+  const unwatchLabel = autoFix.unwatchLabel ?? "Stop watching";
   const { useState, useEffect, useCallback } = host.React;
 
   return function AutoFixPanel(props: AutoFixPanelProps) {
     const [report, setReport] = useState<AutoFixReport | undefined>(undefined);
-    const [busy, setBusy] = useState(false);
+    const [busy, setBusy] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
 
     const body = {
@@ -705,8 +725,11 @@ function createAutoFixPanel(host: PluginHostApi, autoFix: SourceControlAutoFixOp
     }, [statusKey, props.workspaceId, props.taskId, props.connectionScope, props.repositoryId, props.changeRequestNumber]);
 
     const onAction = useCallback(async (request: { actionId?: string }) => {
-      if (request?.actionId !== "auto_fix") return;
-      setBusy(true);
+      const actionId = request?.actionId;
+      if (actionId !== "auto_fix" && actionId !== "watch") return;
+      const command =
+        actionId === "watch" ? (report?.watching ? "unwatch" : "watch") : report?.running ? "stop" : "start";
+      setBusy(actionId);
       setError(null);
       try {
         const response = await host.api.invokeAction<AutoFixStatusResponse>(
@@ -714,7 +737,7 @@ function createAutoFixPanel(host: PluginHostApi, autoFix: SourceControlAutoFixOp
           {
             workspaceId: props.workspaceId,
             taskId: props.taskId,
-            body: { ...body, command: report?.running ? "stop" : "start" },
+            body: { ...body, command },
           },
         );
         const next = normalizeAutoFixReport(response.auto_fix);
@@ -722,12 +745,13 @@ function createAutoFixPanel(host: PluginHostApi, autoFix: SourceControlAutoFixOp
       } catch (cause) {
         setError(cause instanceof Error ? cause.message : String(cause));
       } finally {
-        setBusy(false);
+        setBusy(null);
       }
       // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [actionKey, props.workspaceId, props.taskId, props.connectionScope, props.repositoryId, props.changeRequestNumber, report?.running]);
+    }, [actionKey, props.workspaceId, props.taskId, props.connectionScope, props.repositoryId, props.changeRequestNumber, report?.running, report?.watching]);
 
     const running = report?.running === true;
+    const watching = report?.watching === true;
     const unsupported = report?.status === "unsupported";
     const actions = unsupported
       ? undefined
@@ -738,8 +762,17 @@ function createAutoFixPanel(host: PluginHostApi, autoFix: SourceControlAutoFixOp
             pendingLabel: running ? "Stopping…" : "Starting…",
             placement: "header",
             tone: running ? "secondary" : "default",
-            disabled: report === undefined || busy,
-            busy,
+            disabled: report === undefined || busy !== null,
+            busy: busy === "auto_fix",
+          },
+          {
+            id: "watch",
+            label: watching ? unwatchLabel : watchLabel,
+            pendingLabel: watching ? "Stopping…" : "Starting…",
+            placement: "header",
+            tone: "secondary",
+            disabled: report === undefined || busy !== null,
+            busy: busy === "watch",
           },
         ];
 
@@ -757,7 +790,7 @@ function createAutoFixPanel(host: PluginHostApi, autoFix: SourceControlAutoFixOp
       loading: false,
       error: null,
       actions,
-      busyActionId: busy ? "auto_fix" : null,
+      busyActionId: busy,
       onAction,
       notice,
     });
