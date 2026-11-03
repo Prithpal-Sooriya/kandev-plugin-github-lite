@@ -216,6 +216,20 @@ type AutoFixReport struct {
 	MaxRounds           int    `json:"max_rounds,omitempty"`
 	Message             string `json:"message,omitempty"`
 	UpdatedAt           int64  `json:"updated_at"`
+	// Watching is true while an opt-in watch re-runs the loop whenever the
+	// change request turns actionable; WatchExpiresAt (unix millis) is when
+	// it lapses and WatchMessage the sweep's last observation.
+	Watching       bool   `json:"watching,omitempty"`
+	WatchExpiresAt int64  `json:"watch_expires_at,omitempty"`
+	WatchMessage   string `json:"watch_message,omitempty"`
+}
+
+// ChangeRequestWatcher is the optional capability behind the auto-fix
+// action's watch/unwatch commands: an opt-in, expiring, per-change-request
+// watch that starts the auto-fix loop on its own when the change request
+// turns actionable. Providers may leave it unimplemented.
+type ChangeRequestWatcher interface {
+	SetWatch(ctx context.Context, workspaceID, taskID string, identity ChangeRequestIdentity, enabled bool) (AutoFixReport, error)
 }
 
 // ChangeRequestAutoFixer is the optional capability behind the
@@ -529,8 +543,14 @@ func (e *Extension) autoFixChangeRequest(ctx context.Context, request *pluginsdk
 		report, err = e.AutoFix.StartAutoFix(ctx, request.Context.WorkspaceID, request.Context.TaskID, identity)
 	case "stop":
 		report, err = e.AutoFix.StopAutoFix(ctx, request.Context.WorkspaceID, request.Context.TaskID, identity)
+	case "watch", "unwatch":
+		watcher, ok := e.AutoFix.(ChangeRequestWatcher)
+		if !ok {
+			return nil, fmt.Errorf("source-control recipe: provider %q does not support watch", e.ProviderID)
+		}
+		report, err = watcher.SetWatch(ctx, request.Context.WorkspaceID, request.Context.TaskID, identity, strings.ToLower(strings.TrimSpace(input.Command)) == "watch")
 	default:
-		return nil, fmt.Errorf("source-control recipe: unknown auto-fix command %q (expected start or stop)", input.Command)
+		return nil, fmt.Errorf("source-control recipe: unknown auto-fix command %q (expected start, stop, watch or unwatch)", input.Command)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("source-control recipe: auto-fix %s: %w", strings.ToLower(strings.TrimSpace(input.Command)), err)

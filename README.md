@@ -3,9 +3,10 @@
 A lean GitHub integration for
 [kandev](https://github.com/kdlbs/kandev): just the task-oriented GitHub
 surface, engineered to keep REST API usage minimal. No dashboards, no issue
-browsing, no search API, and — most importantly — **no background poller**.
-Every GitHub call happens because you did something, and every response is
-TTL-cached so refreshing a task costs nothing.
+browsing, no search API, and — most importantly — **always-on poller**.
+Every GitHub call happens because you did something (or opted a PR into
+watching), and every response is TTL-cached so refreshing a task costs
+nothing.
 
 ## Walkthrough
 
@@ -57,19 +58,38 @@ https://github.com/user-attachments/assets/0376dc35-9047-4961-bfc7-5a074b3e2893
   integration's "@ci-auto-fix" magic is connection-locked; this plugin ships
   the same loop as a per-PR button on the Reviews panel, plugin-style:
   press **Auto-fix CI** and a bounded background loop runs the task's agent
-  on that PR until CI is green, merge conflicts are resolved, and *your*
-  (token-owner) review-thread and issue comments are addressed — reading
-  only what each round needs (failing checks with URLs, mergeable state,
-  your comments), dispatching one self-contained `@ci-auto-fix` prompt per
+  on that PR until CI is green, merge conflicts are resolved, and reviewer
+  feedback is dealt with — reading only what each round needs (failing
+  checks with URLs, mergeable state, new review-thread comments, PR
+  comments and review summaries from anyone), dispatching one self-contained `@ci-auto-fix` prompt per
   round, then waiting for the session's turn before looking again. It
   stops on green with no new feedback, your stop press, the round cap
   (default 3), a needs-input turn, or a failed session — never mid-turn —
   and checkpoints each round (head SHA + seen comments + failing-check
   set) so a restart or re-press resumes instead of re-reading. Pending
   checks are waited out, never counted as failures, and the agent is told
-  never to merge the PR. All GitHub traffic is paid at press time; the
-  button's status line is host-state only. Merged/closed PRs and fully
-  green PRs refuse to start.
+  never to merge the PR. The agent uses judgment on feedback — fix what is
+  right, answer questions, push back politely when a suggestion is wrong,
+  skip praise and bot noise — and every GitHub reply it posts starts with
+  **🤖**. That prefix is how the plugin tells the agent's replies (same
+  token as yours) from real feedback: 🤖 replies are never re-dispatched,
+  bot accounts are ignored, and a review thread (or the PR conversation)
+  the agent already answered is not re-sent. The button's status line is
+  host-state only. Merged/closed PRs and fully green PRs refuse to start.
+- **Watch CI (opt-in babysitting).** Toggle **Watch CI** on a PR and the
+  plugin starts that same auto-fix loop by itself whenever the PR turns red,
+  conflicts, or gets new feedback — across as many tasks as you like, window
+  open or not. It is deliberately not a free-running poller: a watch is
+  per-PR, expires (default 8h), and is checked by one shared sweep (default
+  every 5 min, never faster than the cache TTL) that costs a handful of
+  cached-REST reads per watched PR and nothing when no PR is watched. A
+  watch never double-starts a loop, waits when the last round pushed nothing
+  and nothing new arrived, pauses while the session needs your input, stops
+  at a per-PR daily run budget (default 6), and ends when the PR is
+  merged, closed or unlinked. Enable **Watch all linked pull requests** in
+  settings to enrol every linked open PR as it is seen; pressing **Stop
+  watching** on one PR is never overridden. Persisted watches re-arm
+  when kandev next touches that workspace after a plugin restart.
 - **Stays fresh while you watch.** A surface left open (task view, PR status
   strip) re-resolves every 60s while the window is visible, plus immediately
   on window focus, so a PR merged on GitHub shows up as merged instead of
@@ -95,7 +115,8 @@ https://github.com/user-attachments/assets/0376dc35-9047-4961-bfc7-5a074b3e2893
 | No GitHub search API | Search API has a 30 req/min limit regardless of token — never touched |
 | Single bounded rate-limit retry (≤10s) | 403/429 answers wait once, briefly, then surface as errors |
 | Capped pagination (default 3 pages) | Repository listing can't spiral |
-| Auto-fix loop: press-paid, round-bounded | Only the button press spends GitHub calls; max 3 rounds (config), status reads are host-state |
+| Auto-fix loop: press-paid, round-bounded | Only a start (press or watch) spends GitHub calls; max 3 rounds (config), status reads are host-state |
+| Watch: opt-in, expiring, one shared sweep | No watched PR → zero calls; sweep interval ≥ cache TTL, daily run budget per PR |
 | Provider id `github-lite` | Coexists with the built-in GitHub integration; takes over URLs only when the core one is unauthenticated |
 
 ## Setup
@@ -140,6 +161,11 @@ configure at **Settings → Plugins → GitHub Lite**:
 - **Auto-fix enabled** (default on) — the per-PR **Auto-fix CI** button and
   its bounded loop. Disable to hide the button everywhere.
 - **Auto-fix max rounds** (default `3`) — round cap for one auto-fix press.
+- **Watch all linked pull requests** (default off) — enrol every linked open
+  PR in watch mode; per-PR **Watch CI** needs no setting.
+- **Watch duration hours** (default `8`), **check interval minutes**
+  (default `5`, floored at the cache TTL and 2), **fix runs per PR per day**
+  (default `6`).
 
 The plugin requires kandev `0.97.0` or newer (`min_kandev_version` in
 `manifest.yaml`).
@@ -178,12 +204,13 @@ make package-host  # host-platform tarball in .build/
 
 - **Never call the GitHub search API** — its 30 req/min limit is the exact
   burn this plugin exists to avoid.
-- **Add features as pull-based refreshes**, not loops. The recipe contract
-  forbids background pollers; the host asks, the plugin answers from cache or
-  one bounded burst. The auto-fix loop is the one sanctioned exception:
-  user-pressed, round-bounded, checkpointed, and it never polls GitHub on
-  its own — each round reads once, prompted by the previous round's turn
-  ending.
+- **Add features as pull-based refreshes**, not loops. The host asks, the
+  plugin answers from cache or one bounded burst. The auto-fix loop is a
+  sanctioned exception: round-bounded, checkpointed, and it never polls
+  GitHub on its own — each round reads once, prompted by the previous
+  round's turn ending. Watch mode is the other: it starts that loop only for
+  PRs the user opted in, expires, shares one sweep that never beats the cache
+  TTL, and is capped per day. Nothing else may run on a timer.
 - **Identity is the numeric repository ID** (`GET /repositories/{id}`),
   never `owner/name` — renames keep working.
 - **404s and rate-limit errors never unlink associations** — a missing PR is

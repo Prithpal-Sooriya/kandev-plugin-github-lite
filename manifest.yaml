@@ -7,22 +7,26 @@
 #      status, CI chip, and PR detail panel for every linked pull request.
 #   3. A per-PR "Auto-fix" button: a bounded, press-triggered loop that
 #      drives the task's session through @ci-auto-fix-style rounds — fix the
-#      failing checks, resolve merge conflicts, address the token owner's
-#      new or changed PR comments — until the PR is green, the rounds run
-#      out, or nothing is left actionable.
+#      failing checks, resolve merge conflicts, answer reviewers' new or
+#      changed comments (replies carry a 🤖 prefix) — until the PR is green,
+#      the rounds run out, or nothing is left actionable. An opt-in per-PR
+#      "Watch CI" toggle (or the watch-all setting) re-runs that loop by
+#      itself for a bounded time whenever a watched PR turns red or gets
+#      feedback.
 #
 # It never browses GitHub: no issue watching, no PR dashboard, no review
 # queue, and no GitHub search API (which is capped at 30 req/min regardless
 # of token). All calls are core REST, made on demand, behind a TTL cache.
-# There is no background poller: the recipe contract forbids one, so the
-# plugin only ever touches the API when you interact with a task — the
-# auto-fix loop included, which exists only between an explicit button press
-# and its terminal state, with every wait a bounded window.
+# There is no always-on poller: the plugin touches the API when you interact
+# with a task, or for PRs you explicitly opted into watching — an expiring,
+# per-PR watch swept at no less than the cache TTL, capped per day. The
+# auto-fix loop exists only between a start (press or watch) and its terminal
+# state, with every wait a bounded window.
 id: "kandev-plugin-github-lite"
 api_version: 1
-version: "0.2.0"
+version: "0.3.0"
 display_name: "GitHub Lite"
-description: "API-frugal GitHub source control for kandev: repositories for task creation, pull-request status linked to tasks, and a bounded press-triggered @ci-auto-fix loop per pull request. No dashboards, no issue watching, no GitHub search API."
+description: "API-frugal GitHub source control for kandev: repositories for task creation, pull-request status linked to tasks, a bounded @ci-auto-fix loop per pull request, and an opt-in, expiring per-PR watch that re-runs it when CI goes red or reviewers comment. No dashboards, no issue watching, no GitHub search API."
 author: "Prithpal-Sooriya"
 categories: ["connector", "tools"]
 license: "MIT"
@@ -170,3 +174,23 @@ config_schema:
       title: "Auto-fix rounds (max)"
       description: "How many fix rounds one Auto-fix press may run (each round dispatches one @ci-auto-fix prompt to the task and waits for the result)."
       default: 3
+    auto_fix_watch_all:
+      type: boolean
+      title: "Watch all linked pull requests"
+      description: "Enrol every linked open pull request in watch mode as it is seen. Off by default; each PR can also be watched individually from its panel. An explicit Stop watching is never overridden."
+      default: false
+    auto_fix_watch_hours:
+      type: integer
+      title: "Watch duration (hours)"
+      description: "How long one watch lasts before it expires and must be re-armed. Watch-all PRs renew while you keep looking at them."
+      default: 8
+    auto_fix_watch_minutes:
+      type: integer
+      title: "Watch check interval (minutes)"
+      description: "How often watched pull requests are re-read. Never shorter than the cache TTL or 2 minutes. Costs a handful of GitHub calls per watched PR per check; nothing when no PR is watched."
+      default: 5
+    auto_fix_watch_daily_runs:
+      type: integer
+      title: "Watch fix runs per PR per day"
+      description: "Cap on watch-started fix runs per pull request per day, so a stubborn failure cannot burn agent turns forever."
+      default: 6

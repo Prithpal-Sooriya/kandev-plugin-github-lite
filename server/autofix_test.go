@@ -142,7 +142,10 @@ func TestAutoFixHappyPath(t *testing.T) {
 	require.Contains(t, prompt, "mergeable: dirty (conflicts with the base branch)")
 	require.Contains(t, prompt, "src/app.ts:12 please use the helper here")
 	require.Contains(t, prompt, "also fix the docs link")
-	require.NotContains(t, prompt, "looks good to me")
+	// Anyone's feedback is in scope — the agent judges it (and is told to
+	// reply with the 🤖 prefix).
+	require.Contains(t, prompt, "[bob, id 901] src/app.ts:12 looks good to me")
+	require.Contains(t, prompt, `start EVERY reply with "🤖 "`)
 }
 
 // TestAutoFixNoProgressStopsEarly: if the session works the round but pushes
@@ -467,4 +470,50 @@ func TestAutoFixStatusAfterDone(t *testing.T) {
 	require.NoError(t, err)
 	require.False(t, found)
 	require.Equal(t, "idle", report.Status)
+}
+
+// TestAutoFixCommentTriage: feedback from anyone is dispatched, except bots
+// and the agent's own 🤖 replies; a thread (or the PR conversation) the agent
+// already answered is not re-dispatched, and review summaries are included.
+func TestAutoFixCommentTriage(t *testing.T) {
+	shrinkAutoFixTiming(t)
+	github := failingGitHub(t)
+	github.reviewComments["acme/widgets#42"] = []map[string]any{
+		// Thread 900 was answered by the agent below: excluded.
+		{"id": 900, "user": map[string]any{"login": "bob"}, "body": "please use the helper here", "path": "src/app.ts", "line": 12, "created_at": "2024-01-01T00:00:00Z", "updated_at": "2024-01-01T00:00:00Z"},
+		{"id": 902, "in_reply_to_id": 900, "user": map[string]any{"login": "testuser"}, "body": "🤖 Done in abc123", "path": "src/app.ts", "line": 12, "created_at": "2024-01-02T00:00:00Z", "updated_at": "2024-01-02T00:00:00Z"},
+		// Unanswered thread: included.
+		{"id": 903, "user": map[string]any{"login": "carol"}, "body": "rename this variable", "path": "src/util.ts", "line": 3, "created_at": "2024-01-02T00:00:00Z", "updated_at": "2024-01-02T00:00:00Z"},
+		// Bot noise: excluded.
+		{"id": 904, "user": map[string]any{"login": "codecov[bot]", "type": "Bot"}, "body": "coverage dropped", "path": "src/util.ts", "line": 4, "created_at": "2024-01-02T00:00:00Z", "updated_at": "2024-01-02T00:00:00Z"},
+	}
+	github.comments["acme/widgets#42"] = []map[string]any{
+		{"id": 800, "user": map[string]any{"login": "bob"}, "body": "old note before the agent replied", "created_at": "2024-01-01T00:00:00Z"},
+		{"id": 801, "user": map[string]any{"login": "testuser"}, "body": "🤖 handled the docs link", "created_at": "2024-01-02T00:00:00Z"},
+		{"id": 802, "user": map[string]any{"login": "dana"}, "body": "can you also bump the changelog?", "created_at": "2024-01-03T00:00:00Z"},
+	}
+	github.reviews["acme/widgets#42"] = []map[string]any{
+		{"id": 700, "user": map[string]any{"login": "erin"}, "state": "CHANGES_REQUESTED", "body": "the cache key is wrong", "submitted_at": "2024-01-03T00:00:00Z"},
+		{"id": 701, "user": map[string]any{"login": "frank"}, "state": "APPROVED", "body": "ship it", "submitted_at": "2024-01-03T00:00:00Z"},
+	}
+	host := newFakeHost(nil)
+	adapters := newTestAdapters(t, github, host)
+	identity := autoFixIdentity()
+	host.onSend = func(taskID, sessionID, text string) {
+		time.AfterFunc(20*time.Millisecond, func() { host.setSessionState(sessionID, "IDLE") })
+	}
+
+	_, err := adapters.StartAutoFix(context.Background(), "workspace-1", "task-1", identity)
+	require.NoError(t, err)
+	waitAutoFixTerminal(t, adapters, "task-1", identity)
+
+	prompt := host.sentTexts()[0]
+	require.Contains(t, prompt, "rename this variable")
+	require.Contains(t, prompt, "can you also bump the changelog?")
+	require.Contains(t, prompt, "[erin, changes requested] the cache key is wrong")
+	require.NotContains(t, prompt, "please use the helper here", "thread answered by the agent")
+	require.NotContains(t, prompt, "Done in abc123", "agent replies are never feedback")
+	require.NotContains(t, prompt, "coverage dropped", "bot comments are noise")
+	require.NotContains(t, prompt, "old note before the agent replied")
+	require.NotContains(t, prompt, "ship it", "approvals are not actionable")
 }
